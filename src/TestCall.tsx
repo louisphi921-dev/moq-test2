@@ -293,8 +293,8 @@ export const TestCall: Component = () => {
 
   const handleJoin = () => {
     setJoining(true);
-    const relayPath = "anon/" + roomName();
-    connection.url.set(new URL("https://usc.cdn.moq.dev/" + relayPath));
+    const relayPath = roomName();
+    connection.url.set(new URL("https://relay.cloudflare.mediaoverquic.com/" + relayPath));
     connection.enabled.set(true);
 
     const uniquePath = relayPath + "/" + broadcastId;
