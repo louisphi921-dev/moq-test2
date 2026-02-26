@@ -14,106 +14,20 @@ import { Signal, Effect } from "@moq/signals";
 import solid from "@moq/signals/solid";
 import { createAccessor } from "@moq/signals/solid";
 
-// --- Stream Name Helpers ---
-
-function getCountryCode(): string {
-  try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const region = new Intl.Locale(navigator.language).region;
-    if (region) return region.toLowerCase();
-    const continent = tz.split("/")[0]?.toLowerCase() ?? "xx";
-    return continent.slice(0, 2);
-  } catch {
-    return "xx";
-  }
-}
-
-function getOrCreateStreamName(): string {
-  const key = "moq-test-stream-name";
-  const stored = localStorage.getItem(key);
-  if (stored) return stored;
-  const country = getCountryCode();
-  const id = crypto.randomUUID().slice(0, 6);
-  const name = `${country}-${id}`;
-  localStorage.setItem(key, name);
-  return name;
-}
-
-// --- Diagnostic Event Log ---
-
-interface DiagEvent {
-  t: number;
-  tag: string;
-  msg: string;
-}
-
-const T0 = performance.now();
-function diagTime(): number {
-  return Math.round(performance.now() - T0);
-}
-
-// --- Remote Participant ---
-
-interface RemoteParticipant {
-  id: string;
-  broadcast: Watch.Broadcast;
-  sync: Watch.Sync;
-  videoSource: Watch.Video.Source;
-  videoDecoder: Watch.Video.Decoder;
-  audioSource: Watch.Audio.Source;
-  audioDecoder: Watch.Audio.Decoder;
-}
-
-// --- VideoCanvas ---
-
-function VideoCanvas(props: {
-  frame: () => VideoFrame | undefined;
-  flip?: boolean;
-}) {
-  let canvasRef!: HTMLCanvasElement;
-
-  createEffect(() => {
-    const frameRaw = props.frame();
-    if (!frameRaw || !canvasRef) return;
-    const frame = frameRaw.clone();
-    const w = frame.displayWidth;
-    const h = frame.displayHeight;
-    if (canvasRef.width !== w || canvasRef.height !== h) {
-      canvasRef.width = w;
-      canvasRef.height = h;
-    }
-    const ctx = canvasRef.getContext("2d");
-    if (!ctx) {
-      frame.close();
-      return;
-    }
-    ctx.save();
-    ctx.clearRect(0, 0, w, h);
-    if (props.flip) {
-      ctx.scale(-1, 1);
-      ctx.drawImage(frame, -w, 0, w, h);
-    } else {
-      ctx.drawImage(frame, 0, 0, w, h);
-    }
-    ctx.restore();
-    frame.close();
-  });
-
-  return (
-    <canvas ref={canvasRef} class="w-full h-full object-cover bg-black" />
-  );
-}
-
-// --- Component ---
+import type { DiagEvent, RemoteParticipant } from "./types";
+import { diagTime, getOrCreateStreamName } from "./helpers";
+import { VideoCanvas } from "./VideoCanvas";
+import { DebugPanel } from "./DebugPanel";
 
 export const TestCall: Component = () => {
-  // Diagnostic log
   const [diagLog, setDiagLog] = createSignal<DiagEvent[]>([]);
   const log = (tag: string, msg: string) => {
-    setDiagLog((prev) => [{ t: diagTime(), tag, msg }, ...prev].slice(0, 50));
+    const evt = { t: diagTime(), tag, msg };
+    console.log(`[${evt.t}ms] [${tag}] ${msg}`);
+    setDiagLog((prev) => [evt, ...prev].slice(0, 50));
   };
 
-  // Stream name state
+
   const params = useParams<{ streamName?: string }>();
   const urlStream = () =>
     params.streamName?.toLowerCase().replace(/[^a-z0-9-]/g, "");
@@ -127,14 +41,12 @@ export const TestCall: Component = () => {
     localStorage.setItem("moq-test-stream-name", clean);
   };
 
-  // Connection setup
+
   const connection = new Moq.Connection.Reload({ enabled: false });
   const connectionStatus = createAccessor(connection.status);
-
-  // Unique broadcast path
   const broadcastId = crypto.randomUUID().slice(0, 8);
 
-  // Shared signals for mic, video, and speaker
+
   const micEnabled = new Signal<boolean>(false);
   const broadcastVideoEnabled = Signal.from(false);
   const audioOutputEnabled = Signal.from(false);
@@ -198,10 +110,23 @@ export const TestCall: Component = () => {
     },
   });
 
-  // Local video frame accessor
+  const pubSignals = new Effect();
+  pubSignals.effect((eff) => {
+    const active = eff.get(localBroadcast.audio.active);
+    log("pub", `encoder active: ${active}`);
+  });
+  pubSignals.effect((eff) => {
+    const root = eff.get(localBroadcast.audio.root);
+    log("pub", `encoder root: ${root ? "connected" : "none"}`);
+  });
+  pubSignals.effect((eff) => {
+    const config = eff.get(localBroadcast.audio.config);
+    log("pub", `encoder config: ${config ? config.codec : "none"}`);
+  });
+
   const localFrame = solid(localBroadcast.video.frame);
 
-  // Toggle state
+
   const [publishingVideo, setPublishingVideo] = createSignal(false);
   const [publishingAudio, setPublishingAudio] = createSignal(false);
   const [speakerOn, setSpeakerOn] = createSignal(false);
@@ -238,75 +163,9 @@ export const TestCall: Component = () => {
     log("track", `speaker ${next ? "ON" : "OFF"}`);
   };
 
-  // Remote participants state
+
   const [participants, setParticipants] = createSignal<RemoteParticipant[]>([]);
   let announcedEffect: Effect | undefined;
-
-  // Join / Leave
-  const [joined, setJoined] = createSignal(false);
-  const [joining, setJoining] = createSignal(false);
-
-  const handleJoin = () => {
-    setJoining(true);
-    const relayPath = "anon/" + roomName();
-    connection.url.set(new URL("https://usc.cdn.moq.dev/" + relayPath));
-    connection.enabled.set(true);
-
-    const uniquePath = relayPath + "/" + broadcastId;
-    localBroadcast.name.set(Moq.Path.from(uniquePath));
-    localBroadcast.enabled.set(true);
-
-    log("conn", "connection + broadcast enabled");
-    setJoined(true);
-    setJoining(false);
-
-    // Start announced loop
-    runAnnounced(relayPath);
-  };
-
-  const handleLeave = () => {
-    // Close announced effect
-    if (announcedEffect) {
-      announcedEffect.close();
-      announcedEffect = undefined;
-    }
-
-    // Disable tracks
-    broadcastVideoEnabled.set(false);
-    micEnabled.set(false);
-    localVideoSource.enabled.set(false);
-    setPublishingVideo(false);
-    setPublishingAudio(false);
-
-    // Disable broadcast + connection
-    localBroadcast.enabled.set(false);
-    connection.url.set(undefined);
-    connection.enabled.set(false);
-
-    // Close remote participants
-    for (const p of participants()) {
-      p.sync.close();
-      p.videoDecoder.close();
-      p.videoSource.close();
-      p.audioDecoder.close();
-      p.audioSource.close();
-      p.broadcast.close();
-    }
-    setParticipants([]);
-
-    setJoined(false);
-    log("conn", "disconnected");
-  };
-
-  onCleanup(() => {
-    handleLeave();
-    localVideoSource.close();
-    localAudioSource.close();
-    localBroadcast.close();
-    connection.close();
-  });
-
-  // --- Announced loop ---
 
   const runAnnounced = (streamPrefix: string) => {
     if (announcedEffect) {
@@ -338,7 +197,7 @@ export const TestCall: Component = () => {
 
             const localPath = localBroadcast.name.peek();
             if (String(update.path) === String(localPath)) {
-              continue; // skip self
+              continue;
             }
 
             if (update.active) {
@@ -354,8 +213,6 @@ export const TestCall: Component = () => {
       });
     });
   };
-
-  // --- Subscribe to participant ---
 
   const subscribeToParticipant = (pathString: string) => {
     if (participants().find((p) => p.id === pathString)) return;
@@ -375,7 +232,32 @@ export const TestCall: Component = () => {
     const audioDecoder = new Watch.Audio.Decoder(audioSource, { enabled: true });
 
     // Wire audio to speakers
+    const shortPath = pathString.slice(-20);
     const signals = new Effect();
+
+    signals.effect((eff) => {
+      const status = eff.get(broadcast.status);
+      log("sub", `...${shortPath} status → ${status}`);
+    });
+    signals.effect((eff) => {
+      const audioCatalog = eff.get(audioSource.catalog);
+      if (audioCatalog) log("sub", `...${shortPath} audio catalog received`);
+    });
+    signals.effect((eff) => {
+      const root = eff.get(audioDecoder.root);
+      if (root) log("audio", `...${shortPath} audio root available (ctx: ${root.context.state})`);
+    });
+    let lastLoggedBytes = 0;
+    signals.effect((eff) => {
+      const stats = eff.get(audioDecoder.stats);
+      if (!stats || stats.bytesReceived <= 0) return;
+      const b = stats.bytesReceived;
+      if (lastLoggedBytes === 0 || b - lastLoggedBytes >= 1024) {
+        log("audio", `...${shortPath} audio bytes: ${b}`);
+        lastLoggedBytes = b;
+      }
+    });
+
     signals.effect((eff) => {
       const root = eff.get(audioDecoder.root);
       if (!root) return;
@@ -395,26 +277,76 @@ export const TestCall: Component = () => {
       eff.cleanup(() => gain.disconnect());
     });
 
-    // Set initial video target
     videoSource.target.set({ pixels: 640 * 640 });
 
     setParticipants((prev) => [
       ...prev,
-      {
-        id: pathString,
-        broadcast,
-        sync,
-        videoSource,
-        videoDecoder,
-        audioSource,
-        audioDecoder,
-      },
+      { id: pathString, broadcast, sync, videoSource, videoDecoder, audioSource, audioDecoder },
     ]);
 
-    log("sub", `subscribed to ${pathString.slice(-20)}`);
+    log("sub", `subscribed to ...${shortPath}`);
   };
 
-  // --- Pub RMS meter ---
+
+  const [joined, setJoined] = createSignal(false);
+  const [joining, setJoining] = createSignal(false);
+
+  const handleJoin = () => {
+    setJoining(true);
+    const relayPath = "anon/" + roomName();
+    connection.url.set(new URL("https://usc.cdn.moq.dev/" + relayPath));
+    connection.enabled.set(true);
+
+    const uniquePath = relayPath + "/" + broadcastId;
+    localBroadcast.name.set(Moq.Path.from(uniquePath));
+    localBroadcast.enabled.set(true);
+
+    log("conn", "connection + broadcast enabled");
+    setJoined(true);
+    setJoining(false);
+
+    runAnnounced(relayPath);
+  };
+
+  const handleLeave = () => {
+    if (announcedEffect) {
+      announcedEffect.close();
+      announcedEffect = undefined;
+    }
+
+    broadcastVideoEnabled.set(false);
+    micEnabled.set(false);
+    localVideoSource.enabled.set(false);
+    setPublishingVideo(false);
+    setPublishingAudio(false);
+
+    localBroadcast.enabled.set(false);
+    connection.url.set(undefined);
+    connection.enabled.set(false);
+
+    for (const p of participants()) {
+      p.sync.close();
+      p.videoDecoder.close();
+      p.videoSource.close();
+      p.audioDecoder.close();
+      p.audioSource.close();
+      p.broadcast.close();
+    }
+    setParticipants([]);
+
+    setJoined(false);
+    log("conn", "disconnected");
+  };
+
+  onCleanup(() => {
+    handleLeave();
+    pubSignals.close();
+    localVideoSource.close();
+    localAudioSource.close();
+    localBroadcast.close();
+    connection.close();
+  });
+
 
   const [pubRms, setPubRms] = createSignal(0);
   const pubAnalyserBuf = new Uint8Array(1024);
@@ -432,13 +364,10 @@ export const TestCall: Component = () => {
     });
   });
 
-  // --- Sub RMS meter ---
-
   const [subRms, setSubRms] = createSignal(0);
   let subAnalyser: AnalyserNode | undefined;
   const subAnalyserBuf = new Uint8Array(1024);
 
-  // Watch for remote audio roots
   createEffect(() => {
     const ps = participants();
     for (const p of ps) {
@@ -456,8 +385,6 @@ export const TestCall: Component = () => {
       });
     }
   });
-
-  // --- RMS sampling interval ---
 
   const rmsInterval = setInterval(() => {
     if (pubAnalyser) {
@@ -485,12 +412,10 @@ export const TestCall: Component = () => {
   }, 100);
   onCleanup(() => clearInterval(rmsInterval));
 
-  // --- UI ---
 
   return (
     <div class="min-h-screen bg-gray-950 text-white p-6">
       <div class="max-w-5xl mx-auto space-y-6">
-        {/* Title */}
         <div>
           <h1 class="text-2xl font-bold">MoQ Interop Test</h1>
           <p class="text-gray-400 text-sm">
@@ -498,7 +423,6 @@ export const TestCall: Component = () => {
           </p>
         </div>
 
-        {/* Stream name input */}
         <div class="space-y-2">
           <label class="block text-sm font-medium text-gray-400">
             Stream Name
@@ -516,7 +440,6 @@ export const TestCall: Component = () => {
           </p>
         </div>
 
-        {/* Join button (when not joined) */}
         <Show
           when={joined()}
           fallback={
@@ -532,7 +455,6 @@ export const TestCall: Component = () => {
             </button>
           }
         >
-          {/* Controls bar */}
           <div class="flex items-center gap-2">
             <button
               class={`px-4 py-2 rounded font-medium text-sm ${
@@ -572,9 +494,7 @@ export const TestCall: Component = () => {
             </button>
           </div>
 
-          {/* Video grid */}
           <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {/* Local tile */}
             <div class="relative aspect-video rounded-md overflow-hidden bg-gray-800">
               <Show
                 when={publishingVideo()}
@@ -591,7 +511,6 @@ export const TestCall: Component = () => {
               </div>
             </div>
 
-            {/* Remote tiles */}
             <For each={participants()}>
               {(p) => {
                 const remoteFrame = solid(p.videoDecoder.frame);
@@ -607,124 +526,16 @@ export const TestCall: Component = () => {
             </For>
           </div>
 
-          {/* Debug panel */}
-          <div class="font-mono text-sm space-y-4">
-            {/* Status badges */}
-            <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
-              <div class="bg-gray-900 border border-gray-700 rounded p-2">
-                <div class="text-gray-500 text-xs">Connection</div>
-                <div
-                  class={
-                    connectionStatus() === "connected"
-                      ? "text-green-400"
-                      : "text-yellow-400"
-                  }
-                >
-                  {connectionStatus()}
-                </div>
-              </div>
-              <div class="bg-gray-900 border border-gray-700 rounded p-2">
-                <div class="text-gray-500 text-xs">Room</div>
-                <div>{roomName()}</div>
-              </div>
-              <div class="bg-gray-900 border border-gray-700 rounded p-2">
-                <div class="text-gray-500 text-xs">Mic</div>
-                <div
-                  class={publishingAudio() ? "text-green-400" : "text-red-400"}
-                >
-                  {publishingAudio() ? "ON" : "OFF"}
-                </div>
-              </div>
-              <div class="bg-gray-900 border border-gray-700 rounded p-2">
-                <div class="text-gray-500 text-xs">Speaker</div>
-                <div
-                  class={speakerOn() ? "text-green-400" : "text-red-400"}
-                >
-                  {speakerOn() ? "ON" : "OFF"}
-                </div>
-              </div>
-              <div class="bg-gray-900 border border-gray-700 rounded p-2">
-                <div class="text-gray-500 text-xs">Participants</div>
-                <div>{participants().length}</div>
-              </div>
-            </div>
-
-            {/* Pub mic RMS */}
-            <div>
-              <div class="text-xs text-gray-500 mb-1">
-                Pub Mic RMS:{" "}
-                <span
-                  class={pubRms() > 0.01 ? "text-green-400" : "text-red-400"}
-                >
-                  {pubRms().toFixed(3)}
-                </span>
-              </div>
-              <div class="bg-gray-900 rounded h-4 overflow-hidden">
-                <div
-                  class={`h-full transition-all duration-100 ${
-                    pubRms() > 0.01 ? "bg-blue-500" : "bg-red-900/30"
-                  }`}
-                  style={{ width: `${Math.min(pubRms() * 500, 100)}%` }}
-                />
-              </div>
-            </div>
-
-            {/* Sub audio RMS */}
-            <div>
-              <div class="text-xs text-gray-500 mb-1">
-                Sub Audio RMS:{" "}
-                <span
-                  class={subRms() > 0.01 ? "text-green-400" : "text-red-400"}
-                >
-                  {subRms().toFixed(3)}
-                </span>
-              </div>
-              <div class="bg-gray-900 rounded h-4 overflow-hidden">
-                <div
-                  class={`h-full transition-all duration-100 ${
-                    subRms() > 0.01 ? "bg-green-500" : "bg-red-900/30"
-                  }`}
-                  style={{ width: `${Math.min(subRms() * 500, 100)}%` }}
-                />
-              </div>
-            </div>
-
-            {/* Event log */}
-            <div class="space-y-2">
-              <h2 class="text-sm font-medium text-gray-400">Event Log</h2>
-              <div class="bg-gray-900 border border-gray-700 rounded p-3 max-h-64 overflow-y-auto font-mono text-xs text-gray-400">
-                <Show
-                  when={diagLog().length > 0}
-                  fallback={
-                    <p class="text-gray-500 italic">No events yet.</p>
-                  }
-                >
-                  <For each={diagLog()}>
-                    {(event) => (
-                      <div
-                        class={
-                          event.tag === "audio"
-                            ? "text-green-400"
-                            : event.tag === "announced"
-                              ? "text-blue-400"
-                              : event.tag === "retry" || event.tag === "stall"
-                                ? "text-yellow-400"
-                                : event.msg.includes("ERROR") ||
-                                    event.msg.includes("stalled")
-                                  ? "text-red-400"
-                                  : "text-gray-400"
-                        }
-                      >
-                        <span class="text-gray-600">{event.t}ms</span>{" "}
-                        <span class="text-gray-500">[{event.tag}]</span>{" "}
-                        {event.msg}
-                      </div>
-                    )}
-                  </For>
-                </Show>
-              </div>
-            </div>
-          </div>
+          <DebugPanel
+            connectionStatus={connectionStatus}
+            roomName={roomName}
+            publishingAudio={publishingAudio}
+            speakerOn={speakerOn}
+            participantCount={() => participants().length}
+            pubRms={pubRms}
+            subRms={subRms}
+            diagLog={diagLog}
+          />
         </Show>
       </div>
     </div>
