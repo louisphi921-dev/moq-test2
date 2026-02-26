@@ -23,7 +23,7 @@ To share a specific room, use the URL: `http://localhost:3001/my-room-name`
 
 ## CDN
 
-Hardcoded to `https://relay.cloudflare.mediaoverquic.com/` (US Central node). The MoQ CDN also has `euc.cdn.moq.dev` (Europe) and `sea.cdn.moq.dev` (Asia) — change in `src/TestCall.tsx` if needed.
+Hardcoded to `https://us-east-1.relay.sylvan-b.com/` (US Central node). The MoQ CDN also has `euc.cdn.moq.dev` (Europe) and `sea.cdn.moq.dev` (Asia) — change in `src/TestCall.tsx` if needed.
 
 ## Stack
 
