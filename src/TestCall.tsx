@@ -435,7 +435,7 @@ export const TestCall: Component = () => {
             disabled={joined()}
           />
           <p class="text-xs text-gray-500">
-            Connects via MoQ CDN (usc.cdn.moq.dev). Share this stream name
+            Connects via MoQ CDN (https://relay.cloudflare.mediaoverquic.com/). Share this stream name
             with others to test together.
           </p>
         </div>
