@@ -4,12 +4,13 @@ import {
   onCleanup,
   For,
   Show,
+  createEffect,
 } from "solid-js";
 import { useParams } from "@solidjs/router";
 import { PublisherApi } from "./moq-js/publish";
 import Player from "./moq-js/playback";
 import { Client } from "./moq-js/transport/client";
-import { PublishNamespaceRecv } from "./moq-js/transport/subscriber";
+import { Connection } from "./moq-js/transport/connection";
 
 import type { DiagEvent } from "./types";
 import { diagTime, getOrCreateStreamName } from "./helpers";
@@ -17,11 +18,14 @@ import { DebugPanel } from "./DebugPanel";
 
 interface RemoteParticipant {
   id: string;
-  player: any; // Using any because Player type might be complex to import depending on moq-js
+  player: any;
   canvas: HTMLCanvasElement;
+  state: () => {
+    muted: boolean;
+    paused: boolean;
+    videoTrack: string;
+  };
 }
-
-
 export const TestCall: Component = () => {
   const [diagLog, setDiagLog] = createSignal<DiagEvent[]>([]);
   const log = (tag: string, msg: string) => {
@@ -30,13 +34,15 @@ export const TestCall: Component = () => {
     setDiagLog((prev) => [evt, ...prev].slice(0, 50));
   };
 
-
   const params = useParams<{ streamName?: string }>();
   const urlStream = () =>
     params.streamName?.toLowerCase().replace(/[^a-z0-9-]/g, "");
+
   const [roomName, setRoomName] = createSignal(
-    urlStream() || getOrCreateStreamName(),
+    urlStream() || getOrCreateStreamName()
   );
+  const [yourUsername, setYourUsername] = createSignal("user1");
+  const [participantUsername, setParticipantUsername] = createSignal("user2");
 
   const handleNameChange = (value: string) => {
     const clean = value.toLowerCase().replace(/[^a-z0-9-]/g, "");
@@ -44,10 +50,8 @@ export const TestCall: Component = () => {
     localStorage.setItem("moq-test-stream-name", clean);
   };
 
-  const broadcastId = crypto.randomUUID().slice(0, 8);
-
   const [connectionStatus, setConnectionStatus] = createSignal("disconnected");
-  
+
   // Media streams
   const [localStream, setLocalStream] = createSignal<MediaStream | null>(null);
   let localVideoRef: HTMLVideoElement | undefined;
@@ -57,25 +61,53 @@ export const TestCall: Component = () => {
   const [speakerOn, setSpeakerOn] = createSignal(false);
 
   let publisher: any = null;
-  let announceClient: any = null;
-  let announceConnection: any = null;
-  let announceLoopRunning = false;
+  let subscribeInterval: any = null;
+  let sharedClient: Client | null = null;
+  let sharedConnection: Connection | null = null;
 
   const [participants, setParticipants] = createSignal<RemoteParticipant[]>([]);
+
+  createEffect(() => {
+    const stream = localStream();
+    if (stream && localVideoRef) {
+      localVideoRef.srcObject = stream;
+    }
+  });
+
+  const ensureConnection = async () => {
+    if (!sharedConnection) {
+      const relayPath = `${roomName()}/${yourUsername()}`;
+      const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
+      log("conn", `Connecting WebTransport to ${relayUrl}...`);
+      sharedClient = new Client({ url: relayUrl });
+      sharedConnection = await sharedClient.connect();
+      log("conn", "WebTransport connected successfully.");
+    }
+    return sharedConnection;
+  };
 
   // We maintain a local stream for the user
   const ensureLocalStream = async () => {
     if (!localStream()) {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 640 }, height: { ideal: 640 }, frameRate: { ideal: 30 } },
-          audio: { channelCount: { ideal: 1 }, autoGainControl: { ideal: true }, noiseSuppression: { ideal: true }, echoCancellation: { ideal: true } }
+          video: {
+            width: { ideal: 640 },
+            height: { ideal: 640 },
+            frameRate: { ideal: 30 },
+          },
+          audio: {
+            channelCount: { ideal: 1 },
+            autoGainControl: { ideal: true },
+            noiseSuppression: { ideal: true },
+            echoCancellation: { ideal: true },
+          },
         });
-        
+
         // Start muted/paused locally
-        stream.getAudioTracks().forEach(t => t.enabled = false);
-        stream.getVideoTracks().forEach(t => t.enabled = false);
-        
+        stream.getAudioTracks().forEach((t) => (t.enabled = false));
+        stream.getVideoTracks().forEach((t) => (t.enabled = false));
+
         setLocalStream(stream);
         if (localVideoRef) {
           localVideoRef.srcObject = stream;
@@ -93,13 +125,24 @@ export const TestCall: Component = () => {
     if (!stream) return;
 
     if (publisher) {
-        publisher.stop();
+      publisher.stop();
     }
 
-    const relayPath = roomName();
-    const url = "https://us-east-1.relay.sylvan-b.com/" + relayPath;
-    const namespace = [relayPath, broadcastId];
-    log("pub", `Starting publisher to ${url} with namespace ${namespace.join("/")}`);
+    let connection: Connection | null = null;
+    try {
+      connection = await ensureConnection();
+    } catch (e) {
+      log("pub", `Failed to get connection: ${e}`);
+      return;
+    }
+
+    const relayPath = `${roomName()}/${yourUsername()}`;
+    const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
+    const namespace = ["anon", roomName(), yourUsername()];
+    log(
+      "pub",
+      `Starting publisher to ${relayUrl} with namespace ${namespace.join("/")}`
+    );
 
     const videoConfig: VideoEncoderConfig = {
       codec: "avc1.42E01E", // H.264
@@ -114,26 +157,28 @@ export const TestCall: Component = () => {
     const sampleRate = settings?.sampleRate ?? 48000;
     const numberOfChannels = settings?.channelCount ?? 1;
 
-    const audioConfig: AudioEncoderConfig = { 
-      codec: "opus", 
-      sampleRate, 
-      numberOfChannels, 
-      bitrate: 64000 
+    const audioConfig: AudioEncoderConfig = {
+      codec: "opus",
+      sampleRate,
+      numberOfChannels,
+      bitrate: 64000,
     };
 
     publisher = new PublisherApi({
-      url,
+      url: relayUrl,
       namespace,
       media: stream,
       video: videoConfig,
       audio: audioConfig,
+      connection: connection,
     });
 
     try {
       await publisher.publish();
+      // debugCheckSelfSubscribe()
       log("pub", "Publishing active");
     } catch (err) {
-      console.log("err", err)
+      console.log("err", err);
       log("pub", `Publish error: ${err}`);
     }
   };
@@ -149,7 +194,7 @@ export const TestCall: Component = () => {
       log("track", `video ${next ? "ON" : "OFF"}`);
       // If we joined but haven't published yet
       if (joined() && !publisher && (next || publishingAudio())) {
-          startPublishing();
+        startPublishing();
       }
     }
   };
@@ -165,7 +210,7 @@ export const TestCall: Component = () => {
       log("track", `mic ${next ? "ON" : "OFF"}`);
       // If we joined but haven't published yet
       if (joined() && !publisher && (next || publishingVideo())) {
-          startPublishing();
+        startPublishing();
       }
     }
   };
@@ -174,123 +219,165 @@ export const TestCall: Component = () => {
     const next = !speakerOn();
     setSpeakerOn(next);
     log("track", `speaker ${next ? "ON" : "OFF"}`);
-    
+
     // Mute/unmute all participant players
-    participants().forEach(p => {
-        if (p.player && p.player.mute) {
-            p.player.mute(!next);
-        }
+    participants().forEach((p) => {
+      if (p.player && p.player.mute) {
+        p.player.mute(!next);
+      }
     });
   };
 
-  // Wait for announces
-  const runAnnounced = async (relayPath: string) => {
-    announceClient = new Client({ url: "https://us-east-1.relay.sylvan-b.com/" + relayPath });
-    try {
-        announceConnection = await announceClient.connect();
-        log("announced", "Announce connection established. Issuing subscribe for namespace " + relayPath);
-        
-        // Let's assume the relay lets us subscribe to the base namespace to receive publishes
-        // or we check publishedNamespaces()
-        const watcher = announceConnection.publishedNamespaces();
-        announceLoopRunning = true;
+  const subscribeToParticipant = async () => {
+    const targetNamespace = ["anon", roomName(), participantUsername()];
+    const fullNamespaceStr = targetNamespace.join("/");
 
-        log("announced", "Starting loop to watch publishedNamespaces");
-        const scanNamespaces = async () => {
-            while (announceLoopRunning) {
-                const [namespaces, next] = watcher.value();
-                
-                if (namespaces) {
-                    for (const ns of (namespaces as PublishNamespaceRecv[])) {
-                        const nsString = ns.namespace.join("/");
-                        // Skip local broadcast object
-                        if (nsString === `${relayPath}/${broadcastId}`) continue;
-
-                        if (!participants().find(p => p.id === nsString)) {
-                            log("announced", `Discovered new remote namespace: ${nsString}`);
-                            subscribeToParticipant(relayPath, nsString);
-                        }
-                    }
-                }
-
-                if (!next) break;
-                await next;
-            }
-        };
-
-        scanNamespaces();
-    } catch(e) {
-        log("announced", `Failed to connect announce client: ${e}`);
+    if (participants().find((p) => p.id === fullNamespaceStr)) {
+      return;
     }
-  };
 
-  const subscribeToParticipant = async (relayPath: string, fullNamespaceStr: string) => {
-    const namespace = fullNamespaceStr.split("/");
     const canvas = document.createElement("canvas");
     canvas.width = 640;
     canvas.height = 640;
     canvas.className = "w-full h-full object-cover rounded-md bg-gray-800";
 
-    log("sub", `Creating player for ${fullNamespaceStr}...`);
+    const relayPath = `${roomName()}/${participantUsername()}`;
+    const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
+
+    let connection: Connection | null = null;
     try {
-        const player = await Player.create({
-            url: "https://us-east-1.relay.sylvan-b.com/" + relayPath,
-            namespace: fullNamespaceStr, // The exact player namespace usually uses the namespace join or specific tracks
-            canvas: canvas
-        }, 0);
+      connection = await ensureConnection();
+    } catch (e) {
+      log("sub", `Failed to connect before subscribing: ${e}`);
+      return;
+    }
 
-        setParticipants(prev => [...prev, { id: fullNamespaceStr, player, canvas }]);
-        
-        await player.play();
-        await player.mute(!speakerOn());
-        
-        log("sub", `Subscribed to ${fullNamespaceStr}`);
+    log("sub", `Creating player for ${fullNamespaceStr}...`);
 
-        // Listen for disconnected events or handle cleanup
-        // (Assuming player has a mechanism or we monitor it)
-    } catch (err) {
-        log("sub", `Failed to subscribe to ${fullNamespaceStr}: ${err}`);
+    try {
+      const player = await Player.create(
+        {
+          url: relayUrl,
+          namespace: fullNamespaceStr,
+          canvas: canvas,
+          connection: connection,
+        },
+        0
+      );
+
+      const [state, setState] = createSignal({
+        muted: player.muted,
+        paused: player.isPaused(),
+        videoTrack: player.videoTrackName,
+      });
+
+      player.addEventListener("play", () => {
+        setState((s) => ({ ...s, paused: false }));
+      });
+
+      player.addEventListener("pause", () => {
+        setState((s) => ({ ...s, paused: true }));
+      });
+
+      player.addEventListener("volumechange", (e: any) => {
+        setState((s) => ({ ...s, muted: e.detail.muted }));
+      });
+
+      setParticipants((prev) => [
+        ...prev,
+        { id: fullNamespaceStr, player, canvas, state },
+      ]);
+
+      await player.play();
+      await player.mute(!speakerOn());
+
+      log("sub", `Subscribed to ${fullNamespaceStr}`);
+    } catch (err: any) {
+      if (err?.message?.includes("no catalog data")) {
+        log(
+          "sub",
+          `Participant ${participantUsername()} has not published yet.`
+        );
+      } else {
+        log("sub", `Failed to subscribe: ${err}`);
+      }
     }
   };
-
-
   const [joined, setJoined] = createSignal(false);
   const [joining, setJoining] = createSignal(false);
 
   const handleJoin = async () => {
+    if (!yourUsername() || !participantUsername()) {
+      alert("Please enter both your username and participant username.");
+      return;
+    }
+
     setJoining(true);
     setConnectionStatus("connecting");
-    
+
     // We only start the publisher if they have turned on media, otherwise we just start announce client
     if (publishingAudio() || publishingVideo()) {
-        await startPublishing();
+      await startPublishing();
     }
-    
-    await runAnnounced(roomName());
+
+    try {
+      subscribeToParticipant();
+    } catch {
+      setTimeout(() => {
+        if (joined()) subscribeToParticipant();
+      }, 5000);
+    }
 
     setConnectionStatus("connected");
     setJoined(true);
     setJoining(false);
   };
 
-  const handleLeave = () => {
-    announceLoopRunning = false;
-    
-    if (publisher) {
-        publisher.stop();
-        publisher = null;
+
+  const debugCheckSelfSubscribe = async () => {
+    const namespace = ["anon", roomName(), yourUsername()];
+    const full = namespace.join("/");
+  
+    try {
+      const player = await Player.create(
+        {
+          url: "",
+          namespace: full,
+          canvas: document.createElement("canvas"),
+          connection: await ensureConnection(),
+        },
+        0
+      );
+  
+      console.log("✅ Relay HAS catalog for", full);
+      await player.close();
+    } catch (e) {
+      console.log("❌ Relay has NO catalog for", full);
     }
-    if (announceConnection) {
-        announceConnection.close();
-        announceConnection = null;
+  };
+
+  const handleLeave = () => {
+    if (subscribeInterval) {
+      clearInterval(subscribeInterval);
+      subscribeInterval = null;
+    }
+    if (publisher) {
+      publisher.stop();
+      publisher = null;
     }
 
     for (const p of participants()) {
       if (p.player && p.player.close) {
-          p.player.close();
+        p.player.close();
       }
     }
     setParticipants([]);
+
+    if (sharedConnection) {
+      sharedConnection.close();
+      sharedConnection = null;
+      sharedClient = null;
+    }
 
     setJoined(false);
     setConnectionStatus("disconnected");
@@ -300,10 +387,11 @@ export const TestCall: Component = () => {
   onCleanup(() => {
     handleLeave();
     if (localStream()) {
-        localStream()?.getTracks().forEach(t => t.stop());
+      localStream()
+        ?.getTracks()
+        .forEach((t) => t.stop());
     }
   });
-
 
   // RMS Analyzers
   const [pubRms, setPubRms] = createSignal(0);
@@ -316,25 +404,54 @@ export const TestCall: Component = () => {
       <div class="max-w-5xl mx-auto space-y-6">
         <div>
           <h1 class="text-2xl font-bold">MoQ Interop Test</h1>
-          <p class="text-gray-400 text-sm">
-            Test streaming via MoQ CDN relay
-          </p>
+          <p class="text-gray-400 text-sm">Test streaming via MoQ CDN relay</p>
         </div>
 
-        <div class="space-y-2">
-          <label class="block text-sm font-medium text-gray-400">
-            Stream Name
-          </label>
-          <input
-            type="text"
-            value={roomName()}
-            onInput={(e) => handleNameChange(e.currentTarget.value)}
-            class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white focus:outline-none focus:border-blue-500"
-            disabled={joined()}
-          />
+        <div class="space-y-4">
+          <div class="space-y-2">
+            <label class="block text-sm font-medium text-gray-400">
+              Room Name
+            </label>
+            <input
+              type="text"
+              value={roomName()}
+              onInput={(e) => handleNameChange(e.currentTarget.value)}
+              class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white focus:outline-none focus:border-blue-500"
+              disabled={joined()}
+            />
+          </div>
+          <div class="grid grid-cols-2 gap-4">
+            <div class="space-y-2">
+              <label class="block text-sm font-medium text-gray-400">
+                Your Username
+              </label>
+              <input
+                type="text"
+                value={yourUsername()}
+                onInput={(e) => setYourUsername(e.currentTarget.value.trim())}
+                class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white focus:outline-none focus:border-blue-500"
+                disabled={joined()}
+                placeholder="e.g. user1"
+              />
+            </div>
+            <div class="space-y-2">
+              <label class="block text-sm font-medium text-gray-400">
+                Participant Username
+              </label>
+              <input
+                type="text"
+                value={participantUsername()}
+                onInput={(e) =>
+                  setParticipantUsername(e.currentTarget.value.trim())
+                }
+                class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white focus:outline-none focus:border-blue-500"
+                disabled={joined()}
+                placeholder="e.g. user2"
+              />
+            </div>
+          </div>
           <p class="text-xs text-gray-500">
-            Connects via MoQ CDN (https://us-east-1.relay.sylvan-b.com/). Share this stream name
-            with others to test together.
+            Connects via MoQ CDN (https://us-east-1.relay.sylvan-b.com/).
           </p>
         </div>
 
@@ -403,19 +520,25 @@ export const TestCall: Component = () => {
                 }
               >
                 <video
-                    ref={localVideoRef!}
-                    autoplay
-                    playsinline
-                    muted
-                    class="w-full h-full object-cover"
-                    style={{ transform: 'scaleX(-1)' }}
+                  ref={(el) => {
+                    localVideoRef = el;
+                    const stream = localStream();
+                    if (stream) {
+                      el.srcObject = stream;
+                      el.play().catch(() => {});
+                    }
+                  }}
+                  autoplay
+                  playsinline
+                  muted
+                  class="w-full h-full object-cover"
+                  style={{ transform: "scaleX(-1)" }}
                 />
               </Show>
               <div class="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-xs">
                 You
               </div>
             </div>
-
             <For each={participants()}>
               {(p) => {
                 return (
@@ -423,7 +546,22 @@ export const TestCall: Component = () => {
                     {p.canvas}
                     <div class="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-xs flex flex-col">
                       <span>Participant</span>
-                      <span class="text-[10px] text-gray-400 break-all">{p.id}</span>
+
+                      <span class="text-[10px] text-gray-400 break-all">
+                        {p.id}
+                      </span>
+
+                      <span class="text-[10px] text-green-400">
+                        Video: {p.state().videoTrack || "none"}
+                      </span>
+
+                      <span class="text-[10px] text-yellow-400">
+                        Muted: {p.state().muted ? "Yes" : "No"}
+                      </span>
+
+                      <span class="text-[10px] text-blue-400">
+                        {p.state().paused ? "Paused" : "Playing"}
+                      </span>
                     </div>
                   </div>
                 );

@@ -14,6 +14,7 @@ export interface PlayerConfig {
 	namespace: string
 	fingerprint?: string // URL to fetch TLS certificate fingerprint
 	canvas: HTMLCanvasElement
+	connection?: Connection
 }
 
 // This class must be created on the main thread due to AudioContext.
@@ -67,8 +68,11 @@ export default class Player extends EventTarget {
 	}
 
 	static async create(config: PlayerConfig, tracknum: number): Promise<Player> {
-		const client = new Client({ url: config.url, fingerprint: config.fingerprint })
-		const connection = await client.connect()
+		let connection = config.connection;
+		if (!connection) {
+			const client = new Client({ url: config.url, fingerprint: config.fingerprint })
+			connection = await client.connect()
+		}
 
 		const catalog = await Catalog.fetch(connection, [config.namespace])
 		console.log("catalog", catalog)

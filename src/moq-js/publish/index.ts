@@ -9,26 +9,32 @@ export interface PublisherOptions {
 	video?: VideoEncoderConfig
 	audio?: AudioEncoderConfig
 	fingerprintUrl?: string
+	connection?: Connection
 }
 
 export class PublisherApi {
-	private client: Client
+	private client?: Client
 	private connection?: Connection
 	private broadcast?: Broadcast
 	private opts: PublisherOptions
 
 	constructor(opts: PublisherOptions) {
 		this.opts = opts
-		this.client = new Client({
-			url: opts.url,
-			fingerprint: opts.fingerprintUrl,
-		})
+		this.connection = opts.connection
+		if (!this.connection) {
+			this.client = new Client({
+				url: opts.url,
+				fingerprint: opts.fingerprintUrl,
+			})
+		}
 	}
 
 	async publish(): Promise<void> {
-		if (!this.connection) {
+		if (!this.connection && this.client) {
 			this.connection = await this.client.connect()
 		}
+
+		if (!this.connection) throw new Error("No connection provided or created")
 
 		const bcConfig: BroadcastConfig = {
 			connection: this.connection,
