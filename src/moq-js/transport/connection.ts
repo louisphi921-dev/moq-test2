@@ -6,6 +6,22 @@ import { ControlStream } from "./stream"
 import { Publisher } from "./publisher"
 import { Subscriber } from "./subscriber"
 
+function formatCloseContext(reason: unknown) {
+	if (!reason || typeof reason !== "object") {
+		return `value=${String(reason)}`
+	}
+
+	const err = reason as Record<string, unknown>
+	return [
+		`name=${String(err.name ?? "")}`,
+		`message=${String(err.message ?? "")}`,
+		`closeCode=${String(err.closeCode ?? err.sessionCloseCode ?? "")}`,
+		`reason=${String(err.reason ?? "")}`,
+		`source=${String(err.source ?? "")}`,
+		`stack=${String(err.stack ?? "")}`,
+	].join(" ")
+}
+
 export class Connection {
 	// The established WebTransport session.
 	#quic: WebTransport
@@ -37,6 +53,9 @@ export class Connection {
 	}
 
 	close(code = 0, reason = "") {
+		console.log(
+			`[CLOSE] Connection.close() local=true code=${code} reason=${reason || "<empty>"}`,
+		)
 		this.#quic.close({ closeCode: code, reason })
 	}
 
@@ -73,7 +92,7 @@ export class Connection {
 				await this.#recv(msg)
 			}
 		} catch (e) {
-			console.error("Error in control stream:", e)
+			console.error(`[CLOSE] Error in control stream: ${formatCloseContext(e)}`)
 			throw e
 		}
 	}
@@ -89,7 +108,7 @@ export class Connection {
 				await this.#subscriber.recvObject(obj)
 			}
 		} catch (e) {
-			console.error("Error in object stream:", e)
+			console.error(`[CLOSE] Error in object stream: ${formatCloseContext(e)}`)
 			throw e
 		}
 	}

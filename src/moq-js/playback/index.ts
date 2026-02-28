@@ -316,6 +316,9 @@ export default class Player extends EventTarget {
 	}
 
 	async close(err?: Error) {
+		console.log(
+			`[CLOSE] Player.close() local=true error=${err ? err.message : "<none>"}`,
+		)
 		if (err) this.#abort(err)
 		else this.#close()
 

@@ -29,6 +29,10 @@ interface RemoteParticipant {
 
 const AUTO_TEST_MODE = true;
 const VIDEO_ONLY_PUBLISH = true;
+const MODE_CONNECT_ONLY = "connect-only";
+const MODE_NAMESPACE_ONLY = "namespace-only";
+const MODE_VIDEO_PUBLISH = "video-publish";
+const TEST_MODE = MODE_CONNECT_ONLY;
 
 function defaultSubscribeTarget(username: string): string {
   return username === "user1" ? "user2" : "user1";
@@ -76,6 +80,7 @@ export const TestCall: Component = () => {
 
   let publisher: any = null;
   let subscribeInterval: any = null;
+  let heartbeatInterval: number | null = null;
   let sharedClient: Client | null = null;
   let sharedConnection: Connection | null = null;
 
@@ -103,10 +108,46 @@ export const TestCall: Component = () => {
       const relayUrl = `https://us-east-1.relay.sylvan-b.com/`;
       log("conn", `Connecting WebTransport to ${relayUrl}...`);
       sharedClient = new Client({ url: relayUrl });
-      sharedConnection = await sharedClient.connect();
+      try {
+        sharedConnection = await sharedClient.connect();
+      } catch (err) {
+        sharedClient = null;
+        sharedConnection = null;
+        setConnectionStatus("disconnected");
+        throw err;
+      }
+      setConnectionStatus("connected");
       log("conn", "WebTransport connected successfully.");
+      const currentConnection = sharedConnection;
+      void currentConnection.closed().then((err) => {
+        if (sharedConnection === currentConnection) {
+          setConnectionStatus("disconnected");
+        }
+        log("conn", `[CLOSE] Connection.closed() observed: ${err.message}`);
+      });
     }
     return sharedConnection;
+  };
+
+  const stopHeartbeat = () => {
+    if (heartbeatInterval !== null) {
+      window.clearInterval(heartbeatInterval);
+      heartbeatInterval = null;
+    }
+  };
+
+  const startHeartbeat = (label: string) => {
+    stopHeartbeat();
+    const startedAt = performance.now();
+    heartbeatInterval = window.setInterval(() => {
+      const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
+      console.log(
+        `[HEARTBEAT] mode=${label} connected=${connectionStatus() === "connected"} t=${elapsed}s`,
+      );
+      if (performance.now() - startedAt >= 10_000) {
+        stopHeartbeat();
+      }
+    }, 1000);
   };
 
   // We maintain a local stream for the user
@@ -215,6 +256,28 @@ export const TestCall: Component = () => {
     } catch (err) {
       console.log("err", err);
       log("pub", `Publish error: ${err}`);
+    }
+  };
+
+  const startNamespaceOnly = async () => {
+    let connection: Connection | null = null;
+    try {
+      connection = await ensureConnection();
+    } catch (e) {
+      log("pub", `Failed to get connection: ${e}`);
+      return;
+    }
+
+    const namespace = ["anon", roomName(), "user1"];
+    log("pub", `[PUB] namespace-only mode starting namespace=${namespace.join("/")}`);
+
+    try {
+      const publishedNamespace = await connection.publish_namespace(namespace);
+      log("pub", `[PUB] PublishNamespace sent namespace=${namespace.join("/")}`);
+      await publishedNamespace.ok();
+      log("pub", `[PUB] PublishNamespaceOk received namespace=${namespace.join("/")}`);
+    } catch (err) {
+      log("pub", `Namespace-only publish error: ${err}`);
     }
   };
 
@@ -351,8 +414,20 @@ export const TestCall: Component = () => {
 
     setJoining(true);
     setConnectionStatus("connecting");
+    let didConnect = false;
 
-    if (AUTO_TEST_MODE && yourUsername().trim() === "user1") {
+    if (TEST_MODE === MODE_CONNECT_ONLY) {
+      try {
+        await ensureConnection();
+        didConnect = true;
+        log("conn", "Connect-only mode ready.");
+      } catch (e) {
+        setConnectionStatus("disconnected");
+        log("conn", `Connect-only error: ${e}`);
+      }
+    } else if (TEST_MODE === MODE_NAMESPACE_ONLY) {
+      await startNamespaceOnly();
+    } else if (AUTO_TEST_MODE && yourUsername().trim() === "user1") {
       const stream = await ensureLocalStream();
       if (stream) {
         stream.getAudioTracks().forEach((track) => {
@@ -365,12 +440,12 @@ export const TestCall: Component = () => {
         setPublishingVideo(true);
       }
       await startPublishing();
-    } else if (publishingAudio() || publishingVideo()) {
+    } else if (TEST_MODE === MODE_VIDEO_PUBLISH && (publishingAudio() || publishingVideo())) {
       // We only start the publisher if they have turned on media, otherwise we just start announce client
       await startPublishing();
     }
 
-    if (shouldAutoSubscribe()) {
+    if (TEST_MODE === MODE_VIDEO_PUBLISH && shouldAutoSubscribe()) {
       try {
         subscribeToParticipant();
       } catch {
@@ -379,11 +454,11 @@ export const TestCall: Component = () => {
         }, 5000);
       }
     } else {
-      log("sub", "Test mode: publisher tab does not auto-subscribe.");
+      log("sub", `Mode ${TEST_MODE}: no auto-subscribe.`);
     }
 
-    setConnectionStatus("connected");
-    setJoined(true);
+    startHeartbeat(TEST_MODE);
+    setJoined(didConnect);
     setJoining(false);
   };
 
@@ -410,6 +485,7 @@ export const TestCall: Component = () => {
   };
 
   const handleLeave = () => {
+    stopHeartbeat();
     if (subscribeInterval) {
       clearInterval(subscribeInterval);
       subscribeInterval = null;
@@ -509,6 +585,9 @@ export const TestCall: Component = () => {
             Test mode: publishing as <code>{yourUsername()}</code>, subscribing
             to{" "}
             <code>{shouldAutoSubscribe() ? subscribeTarget() : "none"}</code>.
+          </p>
+          <p class="text-xs text-gray-500">
+            Bisection mode: <code>{TEST_MODE}</code>
           </p>
           <p class="text-xs text-gray-500">
             Connects via MoQ CDN (https://us-east-1.relay.sylvan-b.com/).

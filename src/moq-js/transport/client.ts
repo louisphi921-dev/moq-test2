@@ -15,8 +15,28 @@ type PerformanceWithMemory = Performance & {
 
 let memoryLogStarted = false
 
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 function formatBytes(bytes: number): string {
 	return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+}
+
+function formatCloseDetails(value: unknown): string {
+	if (!value || typeof value !== "object") {
+		return `value=${String(value)}`
+	}
+
+	const err = value as Record<string, unknown>
+	return [
+		`name=${String(err.name ?? "")}`,
+		`message=${String(err.message ?? "")}`,
+		`source=${String(err.source ?? "")}`,
+		`closeCode=${String(err.closeCode ?? err.sessionCloseCode ?? err.streamErrorCode ?? "")}`,
+		`reason=${String(err.reason ?? "")}`,
+		`stack=${String(err.stack ?? "")}`,
+	].join(" ")
 }
 
 function startMemoryLogging() {
@@ -118,14 +138,20 @@ export class Client {
 		  throw e;
 		}
 
+		const rawClose = quic.close.bind(quic)
+		quic.close = ((closeInfo?: WebTransportCloseInfo) => {
+		  console.log(
+			`[CLOSE] WebTransport.close() local=true closeCode=${closeInfo?.closeCode ?? ""} reason=${closeInfo?.reason ?? "<empty>"}`,
+		  )
+		  return rawClose(closeInfo)
+		}) as typeof quic.close
+
 		void quic.closed
 		  .then((info) => {
-			console.log(
-			  `[CLOSE] WebTransport closed code=${info.closeCode} reason=${info.reason || "<empty>"}`,
-			);
+			console.log(`[CLOSE] WebTransport closed ${formatCloseDetails(info)}`);
 		  })
 		  .catch((err) => {
-			console.error("[CLOSE] WebTransport closed with error", err);
+			console.error(`[CLOSE] WebTransport closed with error ${formatCloseDetails(err)}`);
 		  });
 	  
 		try {
@@ -138,15 +164,30 @@ export class Client {
 		}
 	  
 		let stream;
-		try {
-		  console.log("[CONNECT] creating bidirectional control stream");
-		  stream = await quic.createBidirectionalStream({
-			sendOrder: Number.MAX_SAFE_INTEGER,
-		  });
-		  console.log("[CONNECT] bidirectional control stream created");
-		} catch (e) {
-		  console.error("FAILED at STEP 5 (create stream):", e);
-		  throw e;
+		let lastStreamError: unknown;
+		for (let attempt = 1; attempt <= 3; attempt += 1) {
+		  try {
+			console.log(`[STREAM] attempt=${attempt}`);
+			stream = await quic.createBidirectionalStream({
+			  sendOrder: Number.MAX_SAFE_INTEGER,
+			});
+			console.log(`[STREAM] attempt=${attempt} succeeded`);
+			break;
+		  } catch (e) {
+			lastStreamError = e;
+			const err = e as { name?: string; message?: string };
+			console.error(
+			  `[STREAM] attempt=${attempt} failed name=${String(err?.name ?? "")} message=${String(err?.message ?? e)}`,
+			);
+			if (attempt < 3) {
+			  await sleep(100);
+			}
+		  }
+		}
+
+		if (!stream) {
+		  console.error("FAILED at STEP 5 (create stream):", lastStreamError);
+		  throw lastStreamError;
 		}
 	  
 		const buffer = new ReadableWritableStreamBuffer(

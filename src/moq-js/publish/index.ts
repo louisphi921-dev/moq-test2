@@ -53,6 +53,7 @@ export class PublisherApi {
 	}
 
 	async stop(): Promise<void> {
+		console.log("[CLOSE] PublisherApi.stop() local=true")
 		if (this.broadcast) {
 			this.broadcast.close()
 			await this.broadcast.closed()
