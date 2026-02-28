@@ -26,6 +26,13 @@ interface RemoteParticipant {
     videoTrack: string;
   };
 }
+
+const AUTO_TEST_MODE = true;
+
+function defaultSubscribeTarget(username: string): string {
+  return username === "user1" ? "user2" : "user1";
+}
+
 export const TestCall: Component = () => {
   const [diagLog, setDiagLog] = createSignal<DiagEvent[]>([]);
   const log = (tag: string, msg: string) => {
@@ -43,6 +50,12 @@ export const TestCall: Component = () => {
   );
   const [yourUsername, setYourUsername] = createSignal("user1");
   const [participantUsername, setParticipantUsername] = createSignal("user2");
+  const shouldAutoSubscribe = () =>
+    !AUTO_TEST_MODE || yourUsername().trim() !== "user1";
+  const subscribeTarget = () =>
+    AUTO_TEST_MODE
+      ? defaultSubscribeTarget(yourUsername().trim() || "user1")
+      : participantUsername().trim();
 
   const handleNameChange = (value: string) => {
     const clean = value.toLowerCase().replace(/[^a-z0-9-]/g, "");
@@ -73,6 +86,14 @@ export const TestCall: Component = () => {
       localVideoRef.srcObject = stream;
     }
   });
+
+  const setUsernameWithDefaultTarget = (value: string) => {
+    const next = value.trim();
+    setYourUsername(next);
+    if (AUTO_TEST_MODE && !joined()) {
+      setParticipantUsername(defaultSubscribeTarget(next || "user1"));
+    }
+  };
 
   const ensureConnection = async () => {
     if (!sharedConnection) {
@@ -177,6 +198,8 @@ export const TestCall: Component = () => {
 
     try {
       await publisher.publish();
+      console.log(`[PUB] publish started namespace=${namespace.join("/")}`);
+      log("pub", `[PUB] publish started namespace=${namespace.join("/")}`);
       // debugCheckSelfSubscribe()
       log("pub", "Publishing active");
     } catch (err) {
@@ -231,7 +254,8 @@ export const TestCall: Component = () => {
   };
 
   const subscribeToParticipant = async () => {
-    const targetNamespace = ["anon", roomName(), participantUsername()];
+    const targetUser = subscribeTarget();
+    const targetNamespace = ["anon", roomName(), targetUser];
     const fullNamespaceStr = targetNamespace.join("/");
 
     if (participants().find((p) => p.id === fullNamespaceStr)) {
@@ -243,7 +267,7 @@ export const TestCall: Component = () => {
     canvas.height = 640;
     canvas.className = "w-full h-full object-cover rounded-md bg-gray-800";
 
-    const relayPath = `${roomName()}/${participantUsername()}`;
+    const relayPath = `${roomName()}/${targetUser}`;
     // const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
     const relayUrl = `https://us-east-1.relay.sylvan-b.com/`;
 
@@ -255,7 +279,7 @@ export const TestCall: Component = () => {
       return;
     }
 
-    log("sub", `Creating player for ${fullNamespaceStr}...`);
+      log("sub", `Creating player for ${fullNamespaceStr}...`);
 
     try {
       const player = await Player.create(
@@ -299,7 +323,7 @@ export const TestCall: Component = () => {
       if (err?.message?.includes("no catalog data")) {
         log(
           "sub",
-          `Participant ${participantUsername()} has not published yet.`,
+          `Participant ${targetUser} has not published yet.`,
         );
       } else {
         log("sub", `Failed to subscribe: ${err}`);
@@ -310,7 +334,7 @@ export const TestCall: Component = () => {
   const [joining, setJoining] = createSignal(false);
 
   const handleJoin = async () => {
-    if (!yourUsername() || !participantUsername()) {
+    if (!yourUsername() || !subscribeTarget()) {
       alert("Please enter both your username and participant username.");
       return;
     }
@@ -318,17 +342,34 @@ export const TestCall: Component = () => {
     setJoining(true);
     setConnectionStatus("connecting");
 
-    // We only start the publisher if they have turned on media, otherwise we just start announce client
-    if (publishingAudio() || publishingVideo()) {
+    if (AUTO_TEST_MODE && yourUsername().trim() === "user1") {
+      const stream = await ensureLocalStream();
+      if (stream) {
+        stream.getAudioTracks().forEach((track) => {
+          track.enabled = true;
+        });
+        stream.getVideoTracks().forEach((track) => {
+          track.enabled = true;
+        });
+        setPublishingAudio(true);
+        setPublishingVideo(true);
+      }
+      await startPublishing();
+    } else if (publishingAudio() || publishingVideo()) {
+      // We only start the publisher if they have turned on media, otherwise we just start announce client
       await startPublishing();
     }
 
-    try {
-      subscribeToParticipant();
-    } catch {
-      setTimeout(() => {
-        if (joined()) subscribeToParticipant();
-      }, 5000);
+    if (shouldAutoSubscribe()) {
+      try {
+        subscribeToParticipant();
+      } catch {
+        setTimeout(() => {
+          if (joined()) subscribeToParticipant();
+        }, 5000);
+      }
+    } else {
+      log("sub", "Test mode: publisher tab does not auto-subscribe.");
     }
 
     setConnectionStatus("connected");
@@ -430,7 +471,9 @@ export const TestCall: Component = () => {
               <input
                 type="text"
                 value={yourUsername()}
-                onInput={(e) => setYourUsername(e.currentTarget.value.trim())}
+                onInput={(e) =>
+                  setUsernameWithDefaultTarget(e.currentTarget.value)
+                }
                 class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white focus:outline-none focus:border-blue-500"
                 disabled={joined()}
                 placeholder="e.g. user1"
@@ -442,16 +485,21 @@ export const TestCall: Component = () => {
               </label>
               <input
                 type="text"
-                value={participantUsername()}
+                value={AUTO_TEST_MODE ? subscribeTarget() : participantUsername()}
                 onInput={(e) =>
                   setParticipantUsername(e.currentTarget.value.trim())
                 }
                 class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white focus:outline-none focus:border-blue-500"
-                disabled={joined()}
+                disabled={joined() || AUTO_TEST_MODE}
                 placeholder="e.g. user2"
               />
             </div>
           </div>
+          <p class="text-xs text-gray-500">
+            Test mode: publishing as <code>{yourUsername()}</code>, subscribing
+            to{" "}
+            <code>{shouldAutoSubscribe() ? subscribeTarget() : "none"}</code>.
+          </p>
           <p class="text-xs text-gray-500">
             Connects via MoQ CDN (https://us-east-1.relay.sylvan-b.com/).
           </p>

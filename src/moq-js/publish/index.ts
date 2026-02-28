@@ -2,6 +2,10 @@ import { Client } from "../transport/client"
 import { Broadcast, BroadcastConfig } from "../contribute"
 import { Connection } from "../transport/connection"
 
+function tsNow(): string {
+	return `${performance.now().toFixed(1)}ms`
+}
+
 export interface PublisherOptions {
 	url: string
 	namespace: string[]
@@ -45,6 +49,7 @@ export class PublisherApi {
 		}
 
 		this.broadcast = new Broadcast(bcConfig)
+		console.log(`[PUBLISH] PublisherApi.publish() resolved ts=${tsNow()} waits_for_namespace_ok=false`)
 	}
 
 	async stop(): Promise<void> {

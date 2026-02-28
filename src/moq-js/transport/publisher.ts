@@ -4,6 +4,10 @@ import { Queue, Watch } from "../common/async"
 import { Objects, TrackWriter, ObjectDatagramType } from "./objects"
 import { SubgroupType, SubgroupWriter } from "./subgroup"
 
+function tsNow(): string {
+	return `${performance.now().toFixed(1)}ms`
+}
+
 export class Publisher {
 	// Used to send control messages
 	#control: ControlStream
@@ -13,7 +17,7 @@ export class Publisher {
 
 	// Our announced tracks.
 	#publishedNamespaces = new Map<string, PublishNamespaceSend>()
-	#waitingPublishNamespaceRequests = new Map<bigint, string>()
+	#waitingPublishNamespaceRequests = new Map<bigint, { namespace: string; sentAt: number }>()
 
 	// Their subscribed tracks.
 	#subscribe = new Map<bigint, SubscribeRecv>()
@@ -35,7 +39,9 @@ export class Publisher {
 		const publishNamespaceSend = new PublishNamespaceSend(this.#control, namespace)
 		this.#publishedNamespaces.set(namespace.join("/"), publishNamespaceSend)
 		const id = this.#control.nextRequestId()
-		this.#waitingPublishNamespaceRequests.set(id, namespace.join("/"))
+		const namespaceKey = namespace.join("/")
+		const sentAt = performance.now()
+		this.#waitingPublishNamespaceRequests.set(id, { namespace: namespaceKey, sentAt })
 
 		await this.#control.send({
 			type: Control.ControlMessageType.PublishNamespace,
@@ -44,6 +50,9 @@ export class Publisher {
 				namespace,
 			},
 		})
+		console.log(
+			`[NAMESPACE] PublishNamespace sent id=${id} namespace=${namespaceKey} ts=${tsNow()}`,
+		)
 
 		return publishNamespaceSend
 	}
@@ -74,24 +83,28 @@ export class Publisher {
 	}
 
 	recvPublishNamespaceOk(msg: Control.PublishNamespaceOk) {
-		const namespace = this.#waitingPublishNamespaceRequests.get(msg.id)
-		if (!namespace) {
+		const pending = this.#waitingPublishNamespaceRequests.get(msg.id)
+		if (!pending) {
 			throw new Error(`publish namespace OK for unknown announce: ${msg.id}`)
 		}
+		const { namespace, sentAt } = pending
 		const publishNamespaceSend = this.#publishedNamespaces.get(namespace)
 		if (!publishNamespaceSend) {
 			throw new Error(`no active published namespace: ${namespace}`)
 		}
 
 		publishNamespaceSend.onOk()
-		console.log("published namespace:", namespace)
+		console.log(
+			`[NAMESPACE] PublishNamespaceOk received id=${msg.id} namespace=${namespace} ts=${tsNow()} delta_ms=${(performance.now() - sentAt).toFixed(1)}`,
+		)
 	}
 
 	recvPublishNamespaceError(msg: Control.PublishNamespaceError) {
-		const namespace = this.#waitingPublishNamespaceRequests.get(msg.id)
-		if (!namespace) {
+		const pending = this.#waitingPublishNamespaceRequests.get(msg.id)
+		if (!pending) {
 			throw new Error(`publish namespace error for unknown announce: ${msg.id}`)
 		}
+		const { namespace } = pending
 		const publishNamespaceSend = this.#publishedNamespaces.get(namespace)
 		if (!publishNamespaceSend) {
 			// TODO debug this
