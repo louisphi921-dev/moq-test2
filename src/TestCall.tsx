@@ -15,6 +15,10 @@ import { Connection } from "./moq-js/transport/connection";
 import type { DiagEvent } from "./types";
 import { diagTime, getOrCreateStreamName } from "./helpers";
 import { DebugPanel } from "./DebugPanel";
+import {
+  runWebTransportSmokeTest,
+  type WebTransportSmokeSummary,
+} from "./wt_smoketest";
 
 interface RemoteParticipant {
   id: string;
@@ -85,6 +89,9 @@ export const TestCall: Component = () => {
   let sharedConnection: Connection | null = null;
 
   const [participants, setParticipants] = createSignal<RemoteParticipant[]>([]);
+  const [wtSmokeRunning, setWtSmokeRunning] = createSignal(false);
+  const [wtSmokeSummary, setWtSmokeSummary] =
+    createSignal<WebTransportSmokeSummary | null>(null);
 
   createEffect(() => {
     const stream = localStream();
@@ -148,6 +155,25 @@ export const TestCall: Component = () => {
         stopHeartbeat();
       }
     }, 1000);
+  };
+
+  const runWtSmokeTest = async () => {
+    if (wtSmokeRunning()) return;
+
+    setWtSmokeRunning(true);
+    setWtSmokeSummary(null);
+    log("wt", "[WT] starting sequential smoketest attempts=20 timeout_ms=3000");
+
+    try {
+      const result = await runWebTransportSmokeTest((message) =>
+        log("wt", message),
+      );
+      setWtSmokeSummary(result.summary);
+    } catch (err) {
+      log("wt", `[WT] smoketest runner failed: ${String(err)}`);
+    } finally {
+      setWtSmokeRunning(false);
+    }
   };
 
   // We maintain a local stream for the user
@@ -592,6 +618,24 @@ export const TestCall: Component = () => {
           <p class="text-xs text-gray-500">
             Connects via MoQ CDN (https://us-east-1.relay.sylvan-b.com/).
           </p>
+          <div class="flex items-center gap-3">
+            <button
+              class="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 rounded font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={runWtSmokeTest}
+              disabled={wtSmokeRunning()}
+            >
+              {wtSmokeRunning() ? "Running WT Smoketest..." : "Run WT Smoketest"}
+            </button>
+            <Show when={wtSmokeSummary()}>
+              {(summary) => (
+                <p class="text-xs text-gray-400">
+                  success={summary().successCount} fail={summary().failureCount} avg=
+                  {summary().averageLatencyMs ?? "n/a"}ms p95=
+                  {summary().p95LatencyMs ?? "n/a"}ms
+                </p>
+              )}
+            </Show>
+          </div>
         </div>
 
         <Show
