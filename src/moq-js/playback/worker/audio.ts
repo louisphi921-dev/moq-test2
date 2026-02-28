@@ -10,6 +10,7 @@ export class Renderer {
 
 	#decoder!: AudioDecoder
 	#stream: TransformStream<Frame, AudioData>
+	#loggedFirstDecodedFrame: boolean = false
 
 	constructor(config: Message.ConfigAudio, timeline: Component) {
 		this.#timeline = timeline
@@ -26,6 +27,12 @@ export class Renderer {
 	#start(controller: TransformStreamDefaultController) {
 		this.#decoder = new AudioDecoder({
 			output: (frame: AudioData) => {
+				if (!this.#loggedFirstDecodedFrame) {
+					this.#loggedFirstDecodedFrame = true
+					console.log(
+						`[DECODE] first frame decoded kind=audio ts=${frame.timestamp} frames=${frame.numberOfFrames}`,
+					)
+				}
 				controller.enqueue(frame)
 			},
 			error: console.warn,

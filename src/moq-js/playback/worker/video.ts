@@ -29,6 +29,8 @@ export class Renderer {
 	#waitingForKeyframe: boolean = true
 	#paused: boolean
 	#hasSentWaitingForKeyFrameEvent: boolean = false
+	#loggedFirstDecodedFrame: boolean = false
+	#loggedFirstRenderedFrame: boolean = false
 
 	constructor(config: Message.ConfigVideo, timeline: Component) {
 		this.#canvas = config.canvas
@@ -70,6 +72,12 @@ export class Renderer {
 				if (!ctx) throw new Error("failed to get canvas context")
 
 				ctx.drawImage(frame, 0, 0, frame.displayWidth, frame.displayHeight) // TODO respect aspect ratio
+				if (!this.#loggedFirstRenderedFrame) {
+					this.#loggedFirstRenderedFrame = true
+					console.log(
+						`[RENDER] first frame rendered kind=video ts=${frame.timestamp} size=${frame.displayWidth}x${frame.displayHeight}`,
+					)
+				}
 				frame.close()
 			})
 		}
@@ -78,6 +86,12 @@ export class Renderer {
 	#start(controller: TransformStreamDefaultController<VideoFrame>) {
 		this.#decoder = new VideoDecoder({
 			output: (frame: VideoFrame) => {
+				if (!this.#loggedFirstDecodedFrame) {
+					this.#loggedFirstDecodedFrame = true
+					console.log(
+						`[DECODE] first frame decoded kind=video ts=${frame.timestamp} size=${frame.displayWidth}x${frame.displayHeight}`,
+					)
+				}
 				controller.enqueue(frame)
 			},
 			error: console.error,

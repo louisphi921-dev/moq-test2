@@ -20,6 +20,8 @@ class Worker {
 	// Renderer requests samples, rendering video frames and emitting audio frames.
 	#audio?: Audio.Renderer
 	#video?: Video.Renderer
+	#parsedInitTracks = new Set<string>()
+	#parsedMediaKinds = new Set<"audio" | "video">()
 
 	on(e: MessageEvent) {
 		const msg = e.data as Message.ToWorker
@@ -70,6 +72,16 @@ class Worker {
 
 		// Create a new stream that we will use to decode.
 		const container = new MP4.Parser(await init.promise)
+		if (!this.#parsedInitTracks.has(msg.init)) {
+			this.#parsedInitTracks.add(msg.init)
+			console.log(`[DECODE] init parsed init=${msg.init} kind=${msg.kind}`)
+		}
+		if (!this.#parsedMediaKinds.has(msg.kind)) {
+			this.#parsedMediaKinds.add(msg.kind)
+			console.log(
+				`[DECODE] first media segment parsed kind=${msg.kind} init=${msg.init} group=${msg.header.group_id}`,
+			)
+		}
 
 		const timeline = msg.kind === "audio" ? this.#timeline.audio : this.#timeline.video
 		const reader = new SubgroupReader(msg.header, new ReadableStreamBuffer(msg.stream, msg.buffer))

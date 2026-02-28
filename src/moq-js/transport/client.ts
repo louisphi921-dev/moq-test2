@@ -5,6 +5,40 @@ import { Connection } from "./connection"
 import { ClientSetup, ControlMessageType, ServerSetup } from "./control"
 import { ImmutableBytesBuffer, ReadableWritableStreamBuffer } from "./buffer"
 
+type PerformanceWithMemory = Performance & {
+	memory?: {
+		usedJSHeapSize: number
+		totalJSHeapSize: number
+		jsHeapSizeLimit: number
+	}
+}
+
+let memoryLogStarted = false
+
+function formatBytes(bytes: number): string {
+	return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+}
+
+function startMemoryLogging() {
+	if (memoryLogStarted) return
+	memoryLogStarted = true
+
+	const perf = performance as PerformanceWithMemory
+	if (!perf.memory) {
+		console.log("[CONNECT] memory stats unavailable in this browser")
+		return
+	}
+
+	setInterval(() => {
+		const memory = perf.memory
+		if (!memory) return
+
+		console.log(
+			`[CONNECT] memory used=${formatBytes(memory.usedJSHeapSize)} total=${formatBytes(memory.totalJSHeapSize)} limit=${formatBytes(memory.jsHeapSizeLimit)}`,
+		)
+	}, 15000)
+}
+
 export interface ClientConfig {
 	url: string
 	// If set, the server fingerprint will be fetched from this URL.
@@ -61,32 +95,43 @@ export class Client {
 	// }
 
 	async connect(): Promise<Connection> {
-		console.log("STEP 1: starting connect to", this.config.url);
+		startMemoryLogging()
+		console.log(`[CONNECT] starting connect url=${this.config.url}`);
 	  
 		const options: WebTransportOptions = {};
 	  
 		const fingerprint = await this.#fingerprint;
 		if (fingerprint) {
-		  console.log("STEP 2: fingerprint loaded");
+		  console.log("[CONNECT] fingerprint loaded");
 		  options.serverCertificateHashes = [fingerprint];
 		} else {
-		  console.log("STEP 2: no fingerprint");
+		  console.log("[CONNECT] no fingerprint");
 		}
 	  
 		let quic: WebTransport;
 	  
 		try {
-		  console.log("STEP 3: creating WebTransport");
+		  console.log(`[CONNECT] creating WebTransport url=${this.config.url}`);
 		  quic = new WebTransport(this.config.url, options);
 		} catch (e) {
 		  console.error("FAILED at STEP 3 (constructor):", e);
 		  throw e;
 		}
+
+		void quic.closed
+		  .then((info) => {
+			console.log(
+			  `[CLOSE] WebTransport closed code=${info.closeCode} reason=${info.reason || "<empty>"}`,
+			);
+		  })
+		  .catch((err) => {
+			console.error("[CLOSE] WebTransport closed with error", err);
+		  });
 	  
 		try {
-		  console.log("STEP 4: waiting for quic.ready");
+		  console.log("[CONNECT] waiting for quic.ready");
 		  await quic.ready;
-		  console.log("STEP 4 SUCCESS: WebTransport ready");
+		  console.log(`[CONNECT] quic.ready resolved url=${this.config.url}`);
 		} catch (e) {
 		  console.error("FAILED at STEP 4 (ready):", e);
 		  throw e;
@@ -94,11 +139,11 @@ export class Client {
 	  
 		let stream;
 		try {
-		  console.log("STEP 5: creating bidirectional stream");
+		  console.log("[CONNECT] creating bidirectional control stream");
 		  stream = await quic.createBidirectionalStream({
 			sendOrder: Number.MAX_SAFE_INTEGER,
 		  });
-		  console.log("STEP 5 SUCCESS: stream created");
+		  console.log("[CONNECT] bidirectional control stream created");
 		} catch (e) {
 		  console.error("FAILED at STEP 5 (create stream):", e);
 		  throw e;
@@ -110,7 +155,7 @@ export class Client {
 		);
 	  
 		try {
-		  console.log("STEP 6: sending ClientSetup");
+		  console.log("[CONNECT] sending ClientSetup");
 		  const msg: Control.ClientSetup = {
 			versions: [Control.Version.DRAFT_14],
 			params: new Map(),
@@ -118,16 +163,18 @@ export class Client {
 	  
 		  const serialized = Control.ClientSetup.serialize(msg);
 		  await buffer.write(serialized);
-		  console.log("STEP 6 SUCCESS: ClientSetup sent");
+		  console.log(`[CONNECT] ClientSetup sent versions=${msg.versions.join(",")}`);
 		} catch (e) {
 		  console.error("FAILED at STEP 6 (write setup):", e);
 		  throw e;
 		}
 	  
 		try {
-		  console.log("STEP 7: waiting ServerSetup");
+		  console.log("[CONNECT] waiting for ServerSetup");
 		  const server = await this.readServerSetup(buffer);
-		  console.log("STEP 7 SUCCESS: received ServerSetup", server);
+		  console.log(
+			`[CONNECT] ServerSetup received version=${server.version} params=${server.params.size}`,
+		  );
 	  
 		  if (server.version != Control.Version.DRAFT_14) {
 			throw new Error(`unsupported server version: ${server.version}`);
@@ -136,7 +183,7 @@ export class Client {
 		  const control = new Stream.ControlStream(buffer);
 		  const objects = new Objects(quic);
 	  
-		  console.log("STEP 8: connection fully established");
+		  console.log("[CONNECT] connection fully established");
 		  return new Connection(quic, control, objects);
 		} catch (e) {
 		  console.error("FAILED at STEP 7 (read server setup):", e);

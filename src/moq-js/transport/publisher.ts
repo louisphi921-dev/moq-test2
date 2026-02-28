@@ -109,6 +109,12 @@ export class Publisher {
 			}
 
 			const trackAlias = this.#nextTrackAlias++
+			console.log(
+				`[SUBSCRIBE] accept id=${msg.id} namespace=${msg.namespace.join("/")} track=${msg.name}`,
+			)
+			console.log(
+				`[ALIAS] assign id=${msg.id} alias=${trackAlias} namespace=${msg.namespace.join("/")} track=${msg.name}`,
+			)
 			const subscribe = new SubscribeRecv(this.#control, this.#objects, msg, trackAlias)
 			this.#subscribe.set(msg.id, subscribe)
 			await this.#subscribeQueue.push(subscribe)

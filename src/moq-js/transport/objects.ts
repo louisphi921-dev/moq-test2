@@ -246,12 +246,9 @@ export class Objects {
 	}
 
 	async recv(): Promise<TrackReader | SubgroupReader | undefined> {
-		console.log("Objects.recv waiting for streams")
 		const streams = this.quic.incomingUnidirectionalStreams.getReader()
 
-		console.log("Objects.recv got streams", streams)
 		const { value, done } = await streams.read()
-		console.log("Objects.recv got value, done", value, done)
 		streams.releaseLock()
 
 		if (done) return
@@ -262,7 +259,6 @@ export class Objects {
 		// Try to parse as SubgroupType
 		try {
 			const subgroupType = SubgroupType.try_from(type)
-			console.log("Objects.recv got type", subgroupType)
 
 			const track_alias = await r.getVarInt()
 			const group_id = await r.getNumberVarInt()
@@ -287,7 +283,9 @@ export class Objects {
 				publisher_priority,
 			}
 
-			console.log("Objects.recv got subgroup header", h)
+			console.log(
+				`[OBJECT] subgroup stream received alias=${track_alias} group=${group_id} subgroup=${subgroup_id ?? "implicit"} type=0x${subgroupType.toString(16)}`,
+			)
 
 			return new SubgroupReader(h, r)
 		} catch (e) {
@@ -372,4 +370,3 @@ export class TrackReader {
 		await this.stream.close()
 	}
 }
-

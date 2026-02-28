@@ -6,6 +6,10 @@ import { debug } from "./utils"
 import { ControlStream } from "./stream"
 import { SubgroupReader } from "./subgroup"
 
+function formatNamespace(namespace: string[]): string {
+	return namespace.join("/")
+}
+
 export interface TrackInfo {
 	track_alias: bigint
 	track: TrackReader | SubgroupReader
@@ -96,6 +100,9 @@ export class Subscriber {
 
 	async subscribe(namespace: string[], track: string) {
 		const id = this.#control.nextRequestId()
+		console.log(
+			`[SUBSCRIBE] request id=${id} namespace=${formatNamespace(namespace)} track=${track}`,
+		)
 
 		const subscribe = new SubscribeSend(this.#control, id, namespace, track)
 		this.#subscribe.set(id, subscribe)
@@ -156,7 +163,12 @@ export class Subscriber {
 			callback(msg.id)
 		}
 
-		console.log("subscribe ok", msg)
+		console.log(
+			`[SUBSCRIBE] ok id=${msg.id} namespace=${formatNamespace(subscribe.namespace)} track=${subscribe.track}`,
+		)
+		console.log(
+			`[ALIAS] assigned id=${msg.id} alias=${msg.track_alias} namespace=${formatNamespace(subscribe.namespace)} track=${subscribe.track}`,
+		)
 		subscribe.onOk(msg.track_alias)
 	}
 
@@ -179,23 +191,23 @@ export class Subscriber {
 	}
 
 	async recvObject(reader: TrackReader | SubgroupReader) {
-		console.log("got object on recvObject", reader)
 		// Get track alias from reader header
 		const track_alias = reader.header.track_alias
 
 		// Map track alias back to subscription ID
 		const subscriptionId = this.#aliasToSubscriptionMap.get(track_alias)
-		console.log("got subscriptionId", subscriptionId)
 		const callback = async (id: bigint) => {
 			const subscribe = this.#subscribe.get(id)
 			if (!subscribe) {
 				throw new Error(`data for unknown subscription: ${id}`)
 			}
-			console.log("doing subscribe on data", reader)
+			console.log(
+				`[OBJECT] route alias=${track_alias} subscription=${id} namespace=${formatNamespace(subscribe.namespace)} track=${subscribe.track}`,
+			)
 			return subscribe.onData(reader)
 		}
 		if (subscriptionId === undefined) {
-			console.warn(`Exception track alias ${track_alias} not found in aliasToSubscriptionMap.`)
+			console.warn(`[OBJECT] object arrived before alias mapping alias=${track_alias}`)
 			this.#pendingTrack.set(track_alias, callback)
 			return
 		}

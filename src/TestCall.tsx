@@ -39,7 +39,7 @@ export const TestCall: Component = () => {
     params.streamName?.toLowerCase().replace(/[^a-z0-9-]/g, "");
 
   const [roomName, setRoomName] = createSignal(
-    urlStream() || getOrCreateStreamName()
+    urlStream() || getOrCreateStreamName(),
   );
   const [yourUsername, setYourUsername] = createSignal("user1");
   const [participantUsername, setParticipantUsername] = createSignal("user2");
@@ -77,7 +77,8 @@ export const TestCall: Component = () => {
   const ensureConnection = async () => {
     if (!sharedConnection) {
       const relayPath = `${roomName()}/${yourUsername()}`;
-      const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
+      // const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
+      const relayUrl = `https://us-east-1.relay.sylvan-b.com/`;
       log("conn", `Connecting WebTransport to ${relayUrl}...`);
       sharedClient = new Client({ url: relayUrl });
       sharedConnection = await sharedClient.connect();
@@ -137,11 +138,12 @@ export const TestCall: Component = () => {
     }
 
     const relayPath = `${roomName()}/${yourUsername()}`;
-    const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
+    // const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
+    const relayUrl = `https://us-east-1.relay.sylvan-b.com/`;
     const namespace = ["anon", roomName(), yourUsername()];
     log(
       "pub",
-      `Starting publisher to ${relayUrl} with namespace ${namespace.join("/")}`
+      `Starting publisher to ${relayUrl} with namespace ${namespace.join("/")}`,
     );
 
     const videoConfig: VideoEncoderConfig = {
@@ -242,7 +244,8 @@ export const TestCall: Component = () => {
     canvas.className = "w-full h-full object-cover rounded-md bg-gray-800";
 
     const relayPath = `${roomName()}/${participantUsername()}`;
-    const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
+    // const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
+    const relayUrl = `https://us-east-1.relay.sylvan-b.com/`;
 
     let connection: Connection | null = null;
     try {
@@ -262,7 +265,7 @@ export const TestCall: Component = () => {
           canvas: canvas,
           connection: connection,
         },
-        0
+        0,
       );
 
       const [state, setState] = createSignal({
@@ -296,7 +299,7 @@ export const TestCall: Component = () => {
       if (err?.message?.includes("no catalog data")) {
         log(
           "sub",
-          `Participant ${participantUsername()} has not published yet.`
+          `Participant ${participantUsername()} has not published yet.`,
         );
       } else {
         log("sub", `Failed to subscribe: ${err}`);
@@ -333,11 +336,10 @@ export const TestCall: Component = () => {
     setJoining(false);
   };
 
-
   const debugCheckSelfSubscribe = async () => {
     const namespace = ["anon", roomName(), yourUsername()];
     const full = namespace.join("/");
-  
+
     try {
       const player = await Player.create(
         {
@@ -346,9 +348,9 @@ export const TestCall: Component = () => {
           canvas: document.createElement("canvas"),
           connection: await ensureConnection(),
         },
-        0
+        0,
       );
-  
+
       console.log("✅ Relay HAS catalog for", full);
       await player.close();
     } catch (e) {
