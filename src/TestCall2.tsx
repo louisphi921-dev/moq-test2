@@ -16,6 +16,7 @@ export const TestCall2: Component = () => {
   const [logs, setLogs] = createSignal<string[]>([]);
   const [results, setResults] = createSignal<Result[]>([]);
   const [running, setRunning] = createSignal(false);
+  const [sleepMs, setSleepMs] = createSignal(300);
 
   const log = (msg: string) => {
     console.log(msg);
@@ -86,7 +87,7 @@ export const TestCall2: Component = () => {
       const result = await runSingleTest(i);
       newResults.push(result);
       setResults([...newResults]);
-      await sleep(300);
+      await sleep(sleepMs());
     }
 
     const success = newResults.filter((r) => r.success).length;
@@ -129,6 +130,19 @@ export const TestCall2: Component = () => {
               value={attempts()}
               disabled={running()}
               onInput={(e) => setAttempts(Number(e.currentTarget.value))}
+              class="w-32 px-4 py-2 rounded-lg bg-slate-900 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            />
+          </div>
+
+          <div class="mb-6">
+            <label class="block text-sm mb-2">
+              Sleep Between Attempts (ms)
+            </label>
+            <input
+              type="number"
+              value={sleepMs()}
+              disabled={running()}
+              onInput={(e) => setSleepMs(Number(e.currentTarget.value))}
               class="w-32 px-4 py-2 rounded-lg bg-slate-900 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             />
           </div>
