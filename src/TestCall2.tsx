@@ -1,554 +1,625 @@
-import { Component, createSignal } from "solid-js";
+import {
+  Component,
+  createSignal,
+  onCleanup,
+  For,
+  Show,
+  createEffect,
+} from "solid-js";
+import { useParams } from "@solidjs/router";
+import { PublisherApi } from "./moq-js/publish";
+import Player from "./moq-js/playback";
+import { Client } from "./moq-js/transport/client";
+import { Connection } from "./moq-js/transport/connection";
 
-type Result = {
-  attempt: number;
-  success: boolean;
-  latency?: number;
-  error?: string;
-};
+import type { DiagEvent } from "./types";
+import { diagTime, getOrCreateStreamName } from "./helpers";
+import { DebugPanel } from "./DebugPanel";
 
+interface RemoteParticipant {
+  id: string;
+  player: any;
+  canvas: HTMLCanvasElement;
+  state: () => {
+    muted: boolean;
+    paused: boolean;
+    videoTrack: string;
+  };
+}
 export const TestCall2: Component = () => {
-  const [relayUrl, setRelayUrl] = createSignal(
-    "https://us-east-1.relay.sylvan-b.com/"
-  );
-  const [attempts, setAttempts] = createSignal(20);
+  const [diagLog, setDiagLog] = createSignal<DiagEvent[]>([]);
+  const log = (tag: string, msg: string) => {
+    const evt = { t: diagTime(), tag, msg };
+    console.log(`[${evt.t}ms] [${tag}] ${msg}`);
+    setDiagLog((prev) => [evt, ...prev].slice(0, 50));
+  };
 
-  const [logs, setLogs] = createSignal<string[]>([]);
-  const [running, setRunning] = createSignal(false);
-  const [sleepMs, setSleepMs] = createSignal(300);
-  const [connectionResults, setConnectionResults] = createSignal<Result[]>([]);
-  const [publishResults, setPublishResults] = createSignal<Result[]>([]);
-  const [publishing, setPublishing] = createSignal(false);
-  const [subscribeResults, setSubscribeResults] = createSignal<Result[]>([]);
-  const [myUsername, setMyUsername] = createSignal("user1");
+  const [roomName, setRoomName] = createSignal(getOrCreateStreamName());
+  const [yourUsername, setYourUsername] = createSignal("user1");
   const [participantUsername, setParticipantUsername] = createSignal("user2");
-  let mediaRecorder: MediaRecorder | null = null;
-  let wt: WebTransport | null = null;
-  let subWt: WebTransport | null = null;
-  let videoEl: HTMLVideoElement | undefined;
-  let mediaSource: MediaSource | null = null;
-  let sourceBuffer: SourceBuffer | null = null;
-  let bufferQueue: Uint8Array[] = [];
-  let streamReceived = false;
-  let publishWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
+  const [isPublishing, setIsPublishing] = createSignal(false);
+  const [isSubscribing, setIsSubscribing] = createSignal(false);
 
-  const [subscribing, setSubscribing] = createSignal(false);
+  const handleNameChange = (value: string) => {
+    const clean = value.toLowerCase().replace(/[^a-z0-9-]/g, "");
+    setRoomName(clean);
+    localStorage.setItem("moq-test-stream-name", clean);
+  };
 
-  const appendNext = () => {
-    if (!sourceBuffer) return;
-    if (sourceBuffer.updating) return;
-    if (bufferQueue.length === 0) return;
+  const [connectionStatus, setConnectionStatus] = createSignal("disconnected");
 
-    const chunk = bufferQueue.shift()!;
-    try {
-      sourceBuffer.appendBuffer(chunk);
-    } catch (e) {
-      log("appendBuffer error: " + e);
+  // Media streams
+  const [localStream, setLocalStream] = createSignal<MediaStream | null>(null);
+  let localVideoRef: HTMLVideoElement | undefined;
+
+  const [publishingVideo, setPublishingVideo] = createSignal(false);
+  const [publishingAudio, setPublishingAudio] = createSignal(false);
+  const [speakerOn, setSpeakerOn] = createSignal(false);
+
+  let publisher: any = null;
+  let subscribeInterval: any = null;
+  let sharedClient: Client | null = null;
+  let sharedConnection: Connection | null = null;
+
+  const [participants, setParticipants] = createSignal<RemoteParticipant[]>([]);
+
+  createEffect(() => {
+    const stream = localStream();
+    if (stream && localVideoRef) {
+      localVideoRef.srcObject = stream;
     }
-  };
+  });
 
-  const log = (msg: string) => {
-    console.log(msg);
-    setLogs((prev) => [...prev, msg]);
-  };
-
-  const sleep = (ms: number) =>
-    new Promise((resolve) => setTimeout(resolve, ms));
-
-  const runSingleTest = async (attempt: number): Promise<Result> => {
-    const start = performance.now();
-    log(`Attempt #${attempt} — starting`);
-
-    try {
-      if (typeof WebTransport === "undefined") {
-        throw new Error("WebTransport unsupported");
-      }
-
-      const wt = new WebTransport(relayUrl());
-
-      await Promise.race([
-        wt.ready,
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("READY TIMEOUT")), 5000)
-        ),
-      ]);
-
-      const latency = performance.now() - start;
-
-      log(`Attempt #${attempt} — SUCCESS (${Math.round(latency)} ms)`);
-
-      wt.close();
-
-      return {
-        attempt,
-        success: true,
-        latency,
-      };
-    } catch (err: any) {
-      log(`Attempt #${attempt} — FAIL: ${err?.message || err}`);
-
-      return {
-        attempt,
-        success: false,
-        error: err?.message || String(err),
-      };
+  const ensureConnection = async () => {
+    if (!sharedConnection) {
+      const relayPath = `${roomName()}/${yourUsername()}`;
+      const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
+      log("conn", `Connecting WebTransport to ${relayUrl}...`);
+      sharedClient = new Client({ url: relayUrl });
+      sharedConnection = await sharedClient.connect();
+      log("conn", "WebTransport connected successfully.");
     }
+    return sharedConnection;
   };
 
-  const startPublishTest = async () => {
-    const start = performance.now();
-    try {
-      if (typeof WebTransport === "undefined") {
-        throw new Error("WebTransport unsupported");
-      }
-
-      log("Requesting camera/mic...");
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: true,
-      });
-
-      log("Connecting to relay...");
-
-      const base = relayUrl().endsWith("/") ? relayUrl() : relayUrl() + "/";
-
-      wt = new WebTransport(`${base}${myUsername()}`);
-
-      await wt.ready;
-
-      const latency = performance.now() - start;
-      log("WebTransport ready");
-
-      const transportStream = await wt.createUnidirectionalStream();
-      const publishWriter = transportStream.getWriter();
-
-      mediaRecorder = new MediaRecorder(stream, {
-        mimeType: "video/webm;codecs=vp8,opus",
-      });
-
-      mediaRecorder.ondataavailable = async (event) => {
-        if (event.data.size > 0) {
-          const buffer = await event.data.arrayBuffer();
-          await publishWriter.write(new Uint8Array(buffer));
-          log(`Sent chunk: ${buffer.byteLength} bytes`);
-        }
-      };
-
-      mediaRecorder.start(200);
-      setPublishing(true);
-
-      log("Publishing started");
-      setPublishResults((prev) => [
-        ...prev,
-        {
-          attempt: prev.length + 1,
-          success: true,
-          latency,
-        },
-      ]);
-    } catch (err: any) {
-      setPublishResults((prev) => [
-        ...prev,
-        {
-          attempt: prev.length + 1,
-          success: false,
-          error: err?.message || String(err),
-        },
-      ]);
-      log(`Publish error: ${err?.message || err}`);
-    }
-  };
-
-  const stopPublishTest = async () => {
-    try {
-      mediaRecorder?.stop();
-      await publishWriter?.close();
-      publishWriter = null;
-      wt?.close();
-      setPublishing(false);
-      log("Publishing stopped");
-    } catch (err) {
-      log("Stop error");
-    }
-  };
-
-  const startSubscribeTest = async () => {
-    const start = performance.now();
-    streamReceived = false;
-
-    try {
-      if (typeof WebTransport === "undefined") {
-        throw new Error("WebTransport unsupported");
-      }
-
-      log("Connecting for subscribe...");
-      const base = relayUrl().endsWith("/") ? relayUrl() : relayUrl() + "/";
-
-      subWt = new WebTransport(`${base}${participantUsername()}`);
-
-      await subWt.ready;
-      mediaSource = new MediaSource();
-      if (!videoEl) {
-        log("Video element not ready");
-        return;
-      }
-      videoEl!.src = URL.createObjectURL(mediaSource);
-      videoEl.onloadedmetadata = () => log("Video metadata loaded");
-      videoEl.oncanplay = () => log("Video can play");
-      videoEl.onerror = (e) => log("Video error fired");
-      mediaSource.addEventListener("sourceopen", () => {
-        try {
-          sourceBuffer = mediaSource!.addSourceBuffer(
-            'video/webm; codecs="vp8,opus"'
-          );
-
-          sourceBuffer.mode = "segments";
-
-          sourceBuffer.addEventListener("updateend", () => {
-            appendNext();
-          });
-
-          appendNext();
-        } catch (e) {
-          log("SourceBuffer error: " + e);
-        }
-      });
-
-      const latency = performance.now() - start;
-
-      log("Subscribe transport ready");
-      setSubscribing(true);
-
-      const timeout = setTimeout(() => {
-        if (!streamReceived) {
-          log("❌ Subscribe failed: no incoming stream");
-
-          setSubscribeResults((prev) => [
-            ...prev,
-            {
-              attempt: prev.length + 1,
-              success: false,
-              error: "No incoming stream",
-            },
-          ]);
-        }
-      }, 3000);
-
-      // Listen incoming media streams
-      (async () => {
-        for await (const stream of subWt!.incomingUnidirectionalStreams) {
-          streamReceived = true;
-          clearTimeout(timeout);
-          log("Incoming media stream received");
-
-          const reader = stream.getReader();
-
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) {
-              log("Media stream ended");
-              break;
-            }
-
-            if (value) {
-              bufferQueue.push(value);
-              appendNext();
-              log(`Received media chunk: ${value.length} bytes`);
-            }
-          }
-        }
-
-        setSubscribeResults((prev) => [
-          ...prev,
-          {
-            attempt: prev.length + 1,
-            success: true,
-            latency,
+  // We maintain a local stream for the user
+  const ensureLocalStream = async () => {
+    if (!localStream()) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 640 },
+            height: { ideal: 640 },
+            frameRate: { ideal: 30 },
           },
-        ]);
-      })();
-    } catch (err: any) {
-      log("Subscribe error: " + (err?.message || err));
+          audio: {
+            channelCount: { ideal: 1 },
+            autoGainControl: { ideal: true },
+            noiseSuppression: { ideal: true },
+            echoCancellation: { ideal: true },
+          },
+        });
 
-      setSubscribeResults((prev) => [
-        ...prev,
-        {
-          attempt: prev.length + 1,
-          success: false,
-          error: err?.message || String(err),
-        },
-      ]);
+        // Start muted/paused locally
+        stream.getAudioTracks().forEach((t) => (t.enabled = false));
+        stream.getVideoTracks().forEach((t) => (t.enabled = false));
+
+        setLocalStream(stream);
+        if (localVideoRef) {
+          localVideoRef.srcObject = stream;
+        }
+      } catch (err) {
+        log("media", `Failed to get user media: ${err}`);
+      }
     }
+    return localStream();
   };
 
-  const stopSubscribeTest = async () => {
+  // Publisher Logic
+  const startPublishing = async () => {
+    const stream = await ensureLocalStream();
+    if (!stream) return;
+
+    if (publisher) {
+      publisher.stop();
+    }
+
+    let connection: Connection | null = null;
     try {
-      subWt?.close();
-      subWt = null;
-      bufferQueue = [];
-      sourceBuffer = null;
-      if (mediaSource) mediaSource.endOfStream();
-      mediaSource = null;
-      if (videoEl) videoEl.src = "";
-      setSubscribing(false);
-      log("Subscribe stopped");
+      connection = await ensureConnection();
+    } catch (e) {
+      log("pub", `Failed to get connection: ${e}`);
+      return;
+    }
+
+    const relayPath = `${roomName()}/${yourUsername()}`;
+    const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
+    const namespace = ["anon", roomName(), yourUsername()];
+    log(
+      "pub",
+      `Starting publisher to ${relayUrl} with namespace ${namespace.join("/")}`
+    );
+
+    const videoConfig: VideoEncoderConfig = {
+      codec: "avc1.42E01E", // H.264
+      width: 640,
+      height: 640,
+      bitrate: 1000000,
+      framerate: 30,
+    };
+
+    const audioTrack = stream.getAudioTracks()[0];
+    const settings = audioTrack?.getSettings();
+    const sampleRate = settings?.sampleRate ?? 48000;
+    const numberOfChannels = settings?.channelCount ?? 1;
+
+    const audioConfig: AudioEncoderConfig = {
+      codec: "opus",
+      sampleRate,
+      numberOfChannels,
+      bitrate: 64000,
+    };
+
+    publisher = new PublisherApi({
+      url: relayUrl,
+      namespace,
+      media: stream,
+      video: videoConfig,
+      audio: audioConfig,
+      connection: connection,
+    });
+
+    try {
+      await publisher.publish();
+      // debugCheckSelfSubscribe()
+      log("pub", "Publishing active");
+    } catch (err) {
+      console.log("err", err);
+      log("pub", `Publish error: ${err}`);
+    }
+  };
+
+  const toggleVideo = async () => {
+    const stream = await ensureLocalStream();
+    if (!stream) return;
+    const track = stream.getVideoTracks()[0];
+    if (track) {
+      const next = !publishingVideo();
+      track.enabled = next;
+      setPublishingVideo(next);
+      log("track", `video ${next ? "ON" : "OFF"}`);
+      // If we joined but haven't published yet
+      if (joined() && !publisher && (next || publishingAudio())) {
+        startPublishing();
+      }
+    }
+  };
+
+  const toggleAudio = async () => {
+    const stream = await ensureLocalStream();
+    if (!stream) return;
+    const track = stream.getAudioTracks()[0];
+    if (track) {
+      const next = !publishingAudio();
+      track.enabled = next;
+      setPublishingAudio(next);
+      log("track", `mic ${next ? "ON" : "OFF"}`);
+      // If we joined but haven't published yet
+      if (joined() && !publisher && (next || publishingVideo())) {
+        startPublishing();
+      }
+    }
+  };
+
+  const toggleSpeaker = () => {
+    const next = !speakerOn();
+    setSpeakerOn(next);
+    log("track", `speaker ${next ? "ON" : "OFF"}`);
+
+    // Mute/unmute all participant players
+    participants().forEach((p) => {
+      if (p.player && p.player.mute) {
+        p.player.mute(!next);
+      }
+    });
+  };
+
+  const subscribeToParticipant = async () => {
+    const targetNamespace = ["anon", roomName(), participantUsername()];
+    const fullNamespaceStr = targetNamespace.join("/");
+
+    if (participants().find((p) => p.id === fullNamespaceStr)) {
+      return;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 640;
+    canvas.height = 640;
+    canvas.className = "w-full h-full object-cover rounded-md bg-gray-800";
+
+    const relayPath = `${roomName()}/${participantUsername()}`;
+    const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
+
+    let connection: Connection | null = null;
+    try {
+      connection = await ensureConnection();
+    } catch (e) {
+      log("sub", `Failed to connect before subscribing: ${e}`);
+      return;
+    }
+
+    log("sub", `Creating player for ${fullNamespaceStr}...`);
+
+    try {
+      const player = await Player.create(
+        {
+          url: relayUrl,
+          namespace: fullNamespaceStr,
+          canvas: canvas,
+          connection: connection,
+        },
+        0
+      );
+
+      const [state, setState] = createSignal({
+        muted: player.muted,
+        paused: player.isPaused(),
+        videoTrack: player.videoTrackName,
+      });
+
+      player.addEventListener("play", () => {
+        setState((s) => ({ ...s, paused: false }));
+      });
+
+      player.addEventListener("pause", () => {
+        setState((s) => ({ ...s, paused: true }));
+      });
+
+      player.addEventListener("volumechange", (e: any) => {
+        setState((s) => ({ ...s, muted: e.detail.muted }));
+      });
+
+      setParticipants((prev) => [
+        ...prev,
+        { id: fullNamespaceStr, player, canvas, state },
+      ]);
+
+      await player.play();
+      await player.mute(!speakerOn());
+
+      log("sub", `Subscribed to ${fullNamespaceStr}`);
+    } catch (err: any) {
+      if (err?.message?.includes("no catalog data")) {
+        log(
+          "sub",
+          `Participant ${participantUsername()} has not published yet.`
+        );
+      } else {
+        log("sub", `Failed to subscribe: ${err}`);
+      }
+    }
+  };
+  const [joined, setJoined] = createSignal(false);
+  const [joining, setJoining] = createSignal(false);
+
+  const handleJoin = async () => {
+    if (!yourUsername() || !participantUsername()) {
+      alert("Please enter both your username and participant username.");
+      return;
+    }
+
+    setJoining(true);
+    setConnectionStatus("connecting");
+
+    // We only start the publisher if they have turned on media, otherwise we just start announce client
+    if (publishingAudio() || publishingVideo()) {
+      await startPublishing();
+    }
+
+    try {
+      subscribeToParticipant();
     } catch {
-      log("Stop subscribe error");
+      setTimeout(() => {
+        if (joined()) subscribeToParticipant();
+      }, 5000);
+    }
+
+    setConnectionStatus("connected");
+    setJoined(true);
+    setJoining(false);
+  };
+
+  const debugCheckSelfSubscribe = async () => {
+    const namespace = ["anon", roomName(), yourUsername()];
+    const full = namespace.join("/");
+
+    try {
+      const player = await Player.create(
+        {
+          url: "",
+          namespace: full,
+          canvas: document.createElement("canvas"),
+          connection: await ensureConnection(),
+        },
+        0
+      );
+
+      console.log("✅ Relay HAS catalog for", full);
+      await player.close();
+    } catch (e) {
+      console.log("❌ Relay has NO catalog for", full);
     }
   };
 
-  const runSmokeTest = async () => {
-    if (!relayUrl().startsWith("https://")) {
-      alert("Relay URL must start with https://");
-      return;
+  const handleLeave = () => {
+    if (subscribeInterval) {
+      clearInterval(subscribeInterval);
+      subscribeInterval = null;
+    }
+    if (publisher) {
+      publisher.stop();
+      publisher = null;
     }
 
-    if (attempts() <= 0) {
-      alert("Attempts must be greater than 0");
-      return;
+    for (const p of participants()) {
+      if (p.player && p.player.close) {
+        p.player.close();
+      }
+    }
+    setParticipants([]);
+
+    if (sharedConnection) {
+      sharedConnection.close();
+      sharedConnection = null;
+      sharedClient = null;
     }
 
-    setRunning(true);
-    setLogs([]);
-    setConnectionResults([]);
-
-    const newResults: Result[] = [];
-
-    for (let i = 1; i <= attempts(); i++) {
-      const result = await runSingleTest(i);
-      newResults.push(result);
-      setConnectionResults([...newResults]);
-      await sleep(sleepMs());
-    }
-
-    const success = newResults.filter((r) => r.success).length;
-    const fail = attempts() - success;
-
-    log("---- SUMMARY ----");
-    log(`Success: ${success}`);
-    log(`Fail: ${fail}`);
-    log(`Failure rate: ${Math.round((fail / attempts()) * 100)}%`);
-
-    setRunning(false);
+    setJoined(false);
+    setConnectionStatus("disconnected");
+    log("conn", "disconnected");
   };
 
-  const successCount = () =>
-    connectionResults().filter((r) => r.success).length;
-  const failCount = () => connectionResults().filter((r) => !r.success).length;
+  onCleanup(() => {
+    handleLeave();
+    if (localStream()) {
+      localStream()
+        ?.getTracks()
+        .forEach((t) => t.stop());
+    }
+  });
+
+  // RMS Analyzers
+  const [pubRms, setPubRms] = createSignal(0);
+  const [subRms, setSubRms] = createSignal(0);
+  // (Simplified since moq-js abstracts WebCodecs audio, we can't easily hook AnalyserNode to the Publisher side easily without wrapping it before it goes into MediaStream)
+  // We'll leave RMS at 0 for now as it's purely diagnostic.
 
   return (
-    <div class="min-h-screen bg-slate-900 text-slate-200 font-mono p-10">
-      <div class="max-w-6xl mx-auto space-y-6">
-        <h1 class="text-3xl font-semibold">WebTransport Dev Dashboard</h1>
+    <div class="min-h-screen bg-gray-950 text-white p-6">
+      <div class="max-w-5xl mx-auto space-y-6">
+        <div>
+          <h1 class="text-2xl font-bold">MoQ Interop Test</h1>
+          <p class="text-gray-400 text-sm">Test streaming via MoQ CDN relay</p>
+        </div>
 
-        <div class="bg-slate-800 rounded-2xl p-6 shadow-lg">
-          <h2 class="text-xl font-semibold mb-6">Configuration Connection</h2>
-
-          <div class="grid md:grid-cols-3 gap-6">
-            <div>
-              <label class="block text-sm mb-2 text-slate-400">Relay URL</label>
+        <div class="space-y-4">
+          <div class="space-y-2">
+            <label class="block text-sm font-medium text-gray-400">
+              Room Name
+            </label>
+            <input
+              type="text"
+              value={roomName()}
+              onInput={(e) => handleNameChange(e.currentTarget.value)}
+              class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white focus:outline-none focus:border-blue-500"
+              disabled={joined()}
+            />
+          </div>
+          <div class="grid grid-cols-2 gap-4">
+            <div class="space-y-2">
+              <label class="block text-sm font-medium text-gray-400">
+                Your Username
+              </label>
               <input
                 type="text"
-                value={relayUrl()}
-                disabled={running()}
-                onInput={(e) => setRelayUrl(e.currentTarget.value)}
-                class="w-full px-4 py-2 rounded-lg bg-slate-900 border border-slate-700 focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                value={yourUsername()}
+                onInput={(e) => setYourUsername(e.currentTarget.value.trim())}
+                class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white focus:outline-none focus:border-blue-500"
+                disabled={joined()}
+                placeholder="e.g. user1"
               />
             </div>
-
-            <div>
-              <label class="block text-sm mb-2 text-slate-400">
-                Connection Attempts
+            <div class="space-y-2">
+              <label class="block text-sm font-medium text-gray-400">
+                Participant Username
               </label>
               <input
-                type="number"
-                value={attempts()}
-                disabled={running()}
-                onInput={(e) => setAttempts(Number(e.currentTarget.value))}
-                class="w-full px-4 py-2 rounded-lg bg-slate-900 border border-slate-700 focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-              />
-            </div>
-
-            <div>
-              <label class="block text-sm mb-2 text-slate-400">
-                Connection Sleep Between Attempts (ms)
-              </label>
-              <input
-                type="number"
-                value={sleepMs()}
-                disabled={running()}
-                onInput={(e) => setSleepMs(Number(e.currentTarget.value))}
-                class="w-full px-4 py-2 rounded-lg bg-slate-900 border border-slate-700 focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                type="text"
+                value={participantUsername()}
+                onInput={(e) =>
+                  setParticipantUsername(e.currentTarget.value.trim())
+                }
+                class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white focus:outline-none focus:border-blue-500"
+                disabled={joined()}
+                placeholder="e.g. user2"
               />
             </div>
           </div>
+          <p class="text-xs text-gray-500">
+            Connects via MoQ CDN (https://us-east-1.relay.sylvan-b.com/).
+          </p>
+        </div>
 
-          <h2 class="text-lg font-semibold my-4">
-            Publish / Subscribe Path Configuration
-          </h2>
-          <div>
-            <label class="block text-sm mb-2 text-slate-400">
-              My Username (publish path)
-            </label>
-            <input
-              type="text"
-              value={myUsername()}
-              onInput={(e) => setMyUsername(e.currentTarget.value)}
-              class="w-full px-4 py-2 rounded-lg bg-slate-900 border border-slate-700"
-            />
-          </div>
-
-          <div class="mt-2">
-            <label class="block text-sm mb-2 text-slate-400">
-              Participant Username (subscribe path)
-            </label>
-            <input
-              type="text"
-              value={participantUsername()}
-              onInput={(e) => setParticipantUsername(e.currentTarget.value)}
-              class="w-full px-4 py-2 rounded-lg bg-slate-900 border border-slate-700"
-            />
-          </div>
-
-          <div class="flex gap-4 mt-6 flex-wrap">
+        <Show
+          when={joined()}
+          fallback={
             <button
-              onClick={runSmokeTest}
-              disabled={running()}
-              class={`px-6 py-2 rounded-lg font-semibold transition ${
-                running()
-                  ? "bg-slate-600 cursor-not-allowed"
-                  : "bg-blue-600 hover:bg-blue-700"
-              }`}
+              class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              onClick={handleJoin}
+              disabled={joining()}
             >
-              {running() ? "Running..." : "Start Connection Test"}
+              <Show when={joining()}>
+                <span class="loading loading-spinner loading-sm" />
+              </Show>
+              {joining() ? "Connecting..." : "Join"}
+            </button>
+          }
+        >
+          <div class="flex items-center gap-2">
+            <button
+              class={`px-4 py-2 rounded font-medium text-sm ${
+                publishingAudio()
+                  ? "bg-green-600 hover:bg-green-700"
+                  : "bg-gray-700 hover:bg-gray-600"
+              }`}
+              onClick={toggleAudio}
+            >
+              Mic
+            </button>
+            <button
+              class={`px-4 py-2 rounded font-medium text-sm ${
+                publishingVideo()
+                  ? "bg-green-600 hover:bg-green-700"
+                  : "bg-gray-700 hover:bg-gray-600"
+              }`}
+              onClick={toggleVideo}
+            >
+              Cam
+            </button>
+            <button
+              class={`px-4 py-2 rounded font-medium text-sm ${
+                speakerOn()
+                  ? "bg-green-600 hover:bg-green-700"
+                  : "bg-gray-700 hover:bg-gray-600"
+              }`}
+              onClick={toggleSpeaker}
+            >
+              Spkr
             </button>
 
             <button
-              onClick={() => {
-                if (publishing()) {
-                  stopPublishTest();
-                } else {
-                  startPublishTest();
-                }
-              }}
-              class={`px-6 py-2 rounded-lg font-semibold transition ${
-                publishing()
+              class={`px-4 py-2 rounded font-medium text-sm ${
+                isPublishing()
                   ? "bg-red-600 hover:bg-red-700"
-                  : "bg-green-600 hover:bg-green-700"
-              }`}
-            >
-              {publishing() ? "Stop Publish" : "Start Publish"}
-            </button>
-
-            <button
-              onClick={() => {
-                if (subscribing()) {
-                  stopSubscribeTest();
-                } else {
-                  startSubscribeTest();
-                }
-              }}
-              class={`px-6 py-2 rounded-lg font-semibold transition ${
-                subscribing()
-                  ? "bg-gray-600 hover:bg-gray-700"
                   : "bg-purple-600 hover:bg-purple-700"
               }`}
+              onClick={async () => {
+                if (isPublishing()) {
+                  if (publisher) {
+                    publisher.stop();
+                    publisher = null;
+                  }
+                  setIsPublishing(false);
+                  log("pub", "Publishing stopped manually");
+                } else {
+                  await startPublishing();
+                }
+              }}
             >
-              {subscribing() ? "Stop Subscribe" : "Start Subscribe"}
+              {isPublishing() ? "Stop Pub" : "Start Pub"}
+            </button>
+
+            <button
+              class={`px-4 py-2 rounded font-medium text-sm ${
+                isSubscribing()
+                  ? "bg-red-600 hover:bg-red-700"
+                  : "bg-indigo-600 hover:bg-indigo-700"
+              }`}
+              onClick={async () => {
+                if (isSubscribing()) {
+                  for (const p of participants()) {
+                    if (p.player?.close) p.player.close();
+                  }
+                  setParticipants([]);
+                  setIsSubscribing(false);
+                  log("sub", "Subscription stopped manually");
+                } else {
+                  await subscribeToParticipant();
+                }
+              }}
+            >
+              {isSubscribing() ? "Stop Sub" : "Start Sub"}
+            </button>
+
+            <button
+              class="px-4 py-2 bg-red-600 hover:bg-red-700 rounded font-medium text-sm"
+              onClick={handleLeave}
+            >
+              Leave
             </button>
           </div>
-        </div>
 
-        <div class="bg-slate-800 rounded-2xl p-6 shadow-lg">
-          <h2 class="text-xl font-semibold mb-4 flex items-center justify-between">
-            <span>Connection Results</span>
-            <div class="flex gap-3 text-sm">
-              <span class="bg-green-600 px-3 py-1 rounded-full">
-                Success: {successCount()}
-              </span>
-              <span class="bg-red-600 px-3 py-1 rounded-full">
-                Fail: {failCount()}
-              </span>
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div class="relative aspect-video rounded-md overflow-hidden bg-gray-800">
+              <Show
+                when={publishingVideo()}
+                fallback={
+                  <div class="flex items-center justify-center h-full text-gray-500">
+                    Video Paused
+                  </div>
+                }
+              >
+                <video
+                  ref={(el) => {
+                    localVideoRef = el;
+                    const stream = localStream();
+                    if (stream) {
+                      el.srcObject = stream;
+                      el.play().catch(() => {});
+                    }
+                  }}
+                  autoplay
+                  playsinline
+                  muted
+                  class="w-full h-full object-cover"
+                  style={{ transform: "scaleX(-1)" }}
+                />
+              </Show>
+              <div class="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-xs">
+                You
+              </div>
             </div>
-          </h2>
+            <For each={participants()}>
+              {(p) => {
+                return (
+                  <div class="relative aspect-video rounded-md overflow-hidden bg-gray-800">
+                    {p.canvas}
+                    <div class="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-xs flex flex-col">
+                      <span>Participant</span>
 
-          <div class="bg-slate-900 p-4 rounded-xl border border-slate-700 max-h-64 overflow-auto text-xs">
-            {connectionResults().length === 0 ? (
-              <div class="text-slate-400 italic">No connection tests yet.</div>
-            ) : (
-              <pre>{JSON.stringify(connectionResults(), null, 2)}</pre>
-            )}
+                      <span class="text-[10px] text-gray-400 break-all">
+                        {p.id}
+                      </span>
+
+                      <span class="text-[10px] text-green-400">
+                        Video: {p.state().videoTrack || "none"}
+                      </span>
+
+                      <span class="text-[10px] text-yellow-400">
+                        Muted: {p.state().muted ? "Yes" : "No"}
+                      </span>
+
+                      <span class="text-[10px] text-blue-400">
+                        {p.state().paused ? "Paused" : "Playing"}
+                      </span>
+                    </div>
+                  </div>
+                );
+              }}
+            </For>
           </div>
-        </div>
 
-        <div class="bg-slate-800 rounded-2xl p-6 shadow-lg">
-          <h2 class="text-xl font-semibold mb-4 flex items-center justify-between">
-            <span>Publish Results</span>
-            <div class="flex gap-3 text-sm">
-              <span class="bg-green-600 px-3 py-1 rounded-full">
-                Success: {publishResults().filter((r) => r.success).length}
-              </span>
-              <span class="bg-red-600 px-3 py-1 rounded-full">
-                Fail: {publishResults().filter((r) => !r.success).length}
-              </span>
-            </div>
-          </h2>
-
-          <div class="bg-slate-900 p-4 rounded-xl border border-slate-700 max-h-64 overflow-auto text-xs">
-            {publishResults().length === 0 ? (
-              <div class="text-slate-400 italic">No publish tests yet.</div>
-            ) : (
-              <pre>{JSON.stringify(publishResults(), null, 2)}</pre>
-            )}
-          </div>
-        </div>
-
-        <div class="bg-slate-800 rounded-2xl p-6 shadow-lg">
-          <h2 class="text-xl font-semibold mb-4 flex items-center justify-between">
-            <span>Subscribe Results</span>
-            <div class="flex gap-3 text-sm">
-              <span class="bg-green-600 px-3 py-1 rounded-full">
-                Success: {subscribeResults().filter((r) => r.success).length}
-              </span>
-              <span class="bg-red-600 px-3 py-1 rounded-full">
-                Fail: {subscribeResults().filter((r) => !r.success).length}
-              </span>
-            </div>
-          </h2>
-
-          <div class="bg-slate-900 p-4 rounded-xl border border-slate-700 max-h-64 overflow-auto text-xs">
-            {subscribeResults().length === 0 ? (
-              <div class="text-slate-400 italic">No subscribe tests yet.</div>
-            ) : (
-              <pre>{JSON.stringify(subscribeResults(), null, 2)}</pre>
-            )}
-          </div>
-        </div>
-
-        <div class="bg-slate-800 rounded-2xl p-6 shadow-lg">
-          <h2 class="text-xl font-semibold mb-4">Live Subscribe Video</h2>
-
-          <video
-            ref={(el) => (videoEl = el)}
-            autoplay
-            muted
-            controls
-            class="w-full rounded-xl bg-black"
+          <DebugPanel
+            connectionStatus={() => connectionStatus()}
+            roomName={roomName}
+            publishingAudio={publishingAudio}
+            speakerOn={speakerOn}
+            participantCount={() => participants().length}
+            pubRms={pubRms}
+            subRms={subRms}
+            diagLog={diagLog}
           />
-        </div>
-
-        <div class="bg-slate-800 rounded-2xl p-6 shadow-lg">
-          <h2 class="text-xl font-semibold mb-4">Logs</h2>
-
-          <div class="bg-slate-900 p-4 rounded-xl border border-slate-700 max-h-80 overflow-auto text-xs leading-relaxed">
-            {logs().length === 0 ? (
-              <div class="text-slate-400 italic">No logs yet.</div>
-            ) : (
-              <pre>{logs().join("\n")}</pre>
-            )}
-          </div>
-        </div>
+        </Show>
       </div>
     </div>
   );
