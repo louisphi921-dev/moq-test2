@@ -92,6 +92,8 @@ export const TestCall: Component = () => {
   const [wtSmokeRunning, setWtSmokeRunning] = createSignal(false);
   const [wtSmokeSummary, setWtSmokeSummary] =
     createSignal<WebTransportSmokeSummary | null>(null);
+  const [wtSmokeJson, setWtSmokeJson] = createSignal("");
+  const [wtUseBackoff, setWtUseBackoff] = createSignal(false);
 
   createEffect(() => {
     const stream = localStream();
@@ -162,17 +164,35 @@ export const TestCall: Component = () => {
 
     setWtSmokeRunning(true);
     setWtSmokeSummary(null);
-    log("wt", "[WT] starting sequential smoketest attempts=20 timeout_ms=3000");
+    setWtSmokeJson("");
+    log(
+      "wt",
+      `[WT] starting sequential smoketest attempts=20 timeout_ms=3000 use_backoff=${wtUseBackoff()}`,
+    );
 
     try {
-      const result = await runWebTransportSmokeTest((message) =>
-        log("wt", message),
+      const result = await runWebTransportSmokeTest(
+        (message) => log("wt", message),
+        { useBackoff: wtUseBackoff() },
       );
       setWtSmokeSummary(result.summary);
+      setWtSmokeJson(result.json);
     } catch (err) {
       log("wt", `[WT] smoketest runner failed: ${String(err)}`);
     } finally {
       setWtSmokeRunning(false);
+    }
+  };
+
+  const copyWtResults = async () => {
+    const json = wtSmokeJson();
+    if (!json) return;
+
+    try {
+      await navigator.clipboard.writeText(json);
+      log("wt", `[WT] copied results bytes=${json.length}`);
+    } catch (err) {
+      log("wt", `[WT] copy failed: ${String(err)}`);
     }
   };
 
@@ -619,12 +639,28 @@ export const TestCall: Component = () => {
             Connects via MoQ CDN (https://us-east-1.relay.sylvan-b.com/).
           </p>
           <div class="flex items-center gap-3">
+            <label class="flex items-center gap-2 text-sm text-gray-300">
+              <input
+                type="checkbox"
+                checked={wtUseBackoff()}
+                onChange={(e) => setWtUseBackoff(e.currentTarget.checked)}
+                disabled={wtSmokeRunning()}
+              />
+              Use Backoff
+            </label>
             <button
               class="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 rounded font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               onClick={runWtSmokeTest}
               disabled={wtSmokeRunning()}
             >
               {wtSmokeRunning() ? "Running WT Smoketest..." : "Run WT Smoketest"}
+            </button>
+            <button
+              class="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={copyWtResults}
+              disabled={!wtSmokeJson() || wtSmokeRunning()}
+            >
+              Copy Results
             </button>
             <Show when={wtSmokeSummary()}>
               {(summary) => (
