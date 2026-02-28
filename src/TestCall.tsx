@@ -28,6 +28,7 @@ interface RemoteParticipant {
 }
 
 const AUTO_TEST_MODE = true;
+const VIDEO_ONLY_PUBLISH = true;
 
 function defaultSubscribeTarget(username: string): string {
   return username === "user1" ? "user2" : "user1";
@@ -162,10 +163,17 @@ export const TestCall: Component = () => {
     // const relayUrl = `https://us-east-1.relay.sylvan-b.com/${relayPath}`;
     const relayUrl = `https://us-east-1.relay.sylvan-b.com/`;
     const namespace = ["anon", roomName(), yourUsername()];
+    const publishTracks = VIDEO_ONLY_PUBLISH
+      ? stream.getVideoTracks()
+      : stream.getTracks();
+    const publishStream = new MediaStream(publishTracks);
     log(
       "pub",
       `Starting publisher to ${relayUrl} with namespace ${namespace.join("/")}`,
     );
+    if (VIDEO_ONLY_PUBLISH) {
+      log("pub", "[PUB] video-only publish mode enabled");
+    }
 
     const videoConfig: VideoEncoderConfig = {
       codec: "avc1.42E01E", // H.264
@@ -180,17 +188,19 @@ export const TestCall: Component = () => {
     const sampleRate = settings?.sampleRate ?? 48000;
     const numberOfChannels = settings?.channelCount ?? 1;
 
-    const audioConfig: AudioEncoderConfig = {
-      codec: "opus",
-      sampleRate,
-      numberOfChannels,
-      bitrate: 64000,
-    };
+    const audioConfig: AudioEncoderConfig | undefined = VIDEO_ONLY_PUBLISH
+      ? undefined
+      : {
+          codec: "opus",
+          sampleRate,
+          numberOfChannels,
+          bitrate: 64000,
+        };
 
     publisher = new PublisherApi({
       url: relayUrl,
       namespace,
-      media: stream,
+      media: publishStream,
       video: videoConfig,
       audio: audioConfig,
       connection: connection,
@@ -346,12 +356,12 @@ export const TestCall: Component = () => {
       const stream = await ensureLocalStream();
       if (stream) {
         stream.getAudioTracks().forEach((track) => {
-          track.enabled = true;
+          track.enabled = !VIDEO_ONLY_PUBLISH;
         });
         stream.getVideoTracks().forEach((track) => {
           track.enabled = true;
         });
-        setPublishingAudio(true);
+        setPublishingAudio(!VIDEO_ONLY_PUBLISH);
         setPublishingVideo(true);
       }
       await startPublishing();
